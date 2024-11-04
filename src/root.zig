@@ -136,7 +136,7 @@ pub const SpAllocator = struct {
         return .Ok;
     }
 
-    pub fn deinit(self: *Self, report_leaks: bool) !LeakCheckResult {
+    pub fn deinit(self: *Self, report_leaks: bool) LeakCheckResult {
         const result = self.detectLeaks();
         if (result == .Leak and report_leaks) {
             var iter = self.allocated_blocks.inorderIterator();
@@ -200,15 +200,12 @@ pub const SpAllocator = struct {
     pub const FreeError = error{
         InvalidAddress,
     };
-    pub fn realloc(self: *Self, ptr: ?*anyopaque, size: usize) !?ErasedPtr {
-        if (ptr == null) {
-            return null;
-        }
-        if (!std.mem.isAligned(@intFromPtr(ptr.?), BLOCK_ALIGNMENT)) {
+    pub fn realloc(self: *Self, ptr: *anyopaque, size: usize) !ErasedPtr {
+        if (!std.mem.isAligned(@intFromPtr(ptr), BLOCK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
 
-        const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr.?));
+        const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
         const block_size = self.getBlockSize(ptr_casted);
         if (block_size == null) {
             return FreeError.InvalidAddress;
@@ -220,15 +217,12 @@ pub const SpAllocator = struct {
         return new_data;
     }
 
-    pub fn free(self: *Self, ptr: ?*anyopaque) FreeError!void {
-        if (ptr == null) {
-            return;
-        }
-        if (!std.mem.isAligned(@intFromPtr(ptr.?), BLOCK_ALIGNMENT)) {
+    pub fn free(self: *Self, ptr: *anyopaque) FreeError!void {
+        if (!std.mem.isAligned(@intFromPtr(ptr), BLOCK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
 
-        var entry = self.allocated_blocks.getEntryFor(AllocatedBlock{ .payload = @ptrCast(@alignCast(ptr.?)), .size = undefined });
+        var entry = self.allocated_blocks.getEntryFor(AllocatedBlock{ .payload = @ptrCast(@alignCast(ptr)), .size = undefined });
         if (entry.node == null) {
             return FreeError.InvalidAddress;
         }
@@ -240,7 +234,7 @@ pub var allocator: SpAllocator = undefined;
 var is_allocator_initialized: bool = false;
 
 pub export fn deinitAllocator() callconv(.C) void {
-    _ = allocator.deinit(true) catch std.process.abort();
+    _ = allocator.deinit(true);
 }
 
 fn ensureAllocatorIsInitialized() void {
@@ -269,11 +263,15 @@ pub export fn spcalloc(n: usize, elem_size: usize) callconv(.C) ?*anyopaque {
 }
 
 pub export fn sprealloc(ptr: ?*anyopaque, size: usize) callconv(.C) ?*anyopaque {
+    if (ptr == null) {
+        return null;
+    }
+
     ensureAllocatorIsInitialized();
 
-    return allocator.realloc(@ptrCast(@alignCast(ptr)), size) catch |err| switch (err) {
+    return allocator.realloc(@ptrCast(@alignCast(ptr.?)), size) catch |err| switch (err) {
         error.InvalidAddress => {
-            std.log.err("`realloc` of invalid address 0x{x}", .{@intFromPtr(ptr)});
+            std.log.err("`realloc` of invalid address 0x{x}", .{@intFromPtr(ptr.?)});
             std.process.abort();
         },
         error.OutOfMemory => null,
@@ -289,7 +287,7 @@ pub export fn spfree(ptr: ?*anyopaque) void {
 
     allocator.free(@ptrCast(ptr.?)) catch |err| switch (err) {
         error.InvalidAddress => {
-            std.log.err("`free` of invalid address 0x{x}", .{@intFromPtr(ptr)});
+            std.log.err("`free` of invalid address 0x{x}", .{@intFromPtr(ptr.?)});
             std.process.abort();
         },
     };
@@ -299,7 +297,17 @@ test "basic" {
     allocator = SpAllocator.init();
 
     const p = try allocator.malloc(16);
-    allocator.free(p);
+    try allocator.free(p);
 
     try std.testing.expectEqual(.Ok, allocator.deinit(false));
+}
+
+test "leak" {
+    allocator = SpAllocator.init();
+
+    const p = try allocator.malloc(16);
+    try std.testing.expectEqual(.Leak, allocator.detectLeaks());
+
+    try allocator.free(p);
+    _ = allocator.deinit(false);
 }
