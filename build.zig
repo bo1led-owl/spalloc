@@ -4,8 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // const should_strip = optimize != std.builtin.OptimizeMode.Debug;
-    const should_strip = false;
+    const should_strip = optimize != std.builtin.OptimizeMode.Debug;
     const lib = b.addStaticLibrary(.{
         .name = "allocator",
         .root_source_file = b.path("src/root.zig"),
@@ -13,7 +12,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .strip = should_strip,
     });
-
     lib.linkLibC();
 
     b.installArtifact(lib);
