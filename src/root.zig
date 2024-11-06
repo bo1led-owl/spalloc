@@ -6,113 +6,113 @@ const Error = std.mem.Allocator.Error;
 const KiB = 1024;
 const MiB = 1024 * KiB;
 
-const MIN_BLOCK_SIZE = 16;
-const MAX_SMALL_BLOCK_SIZE = 128;
-const MIN_MEDIUM_BLOCK_SIZE = MAX_SMALL_BLOCK_SIZE * 2;
-const MAX_MEDIUM_BLOCK_SIZE = 8 * KiB;
+const MIN_CHUNK_SIZE = 16;
+const MAX_SMALL_CHUNK_SIZE = 128;
+const MIN_MEDIUM_CHUNK_SIZE = MAX_SMALL_CHUNK_SIZE * 2;
+const MAX_MEDIUM_CHUNK_SIZE = 8 * KiB;
 
-const BLOCK_SIZE_STEP = 16;
-const BLOCK_ALIGNMENT = 8;
+const CHUNK_SIZE_STEP = 16;
+const CHUNK_ALIGNMENT = 8;
 
-const FreeBlock = struct {
-    next: ?*FreeBlock,
+const FreeChunk = struct {
+    next: ?*FreeChunk,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(FreeBlock) <= MIN_BLOCK_SIZE);
-    std.debug.assert(@alignOf(FreeBlock) == BLOCK_ALIGNMENT);
+    std.debug.assert(@sizeOf(FreeChunk) <= MIN_CHUNK_SIZE);
+    std.debug.assert(@alignOf(FreeChunk) == CHUNK_ALIGNMENT);
 }
 
-const ErasedPtr = [*]align(BLOCK_ALIGNMENT) u8;
+const ErasedPtr = [*]align(CHUNK_ALIGNMENT) u8;
 
 fn getMemoryPages(n: usize) Error!ErasedPtr {
     return (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, n * std.mem.page_size)).ptr;
 }
 
-const SmallBlockArena = struct {
-    const NodeMemPool = std.heap.MemoryPool(Chunks.Node);
+const SmallChunkPool = struct {
+    const NodeMemPool = std.heap.MemoryPool(Buffers.Node);
 
-    const Chunk = struct {
+    const Buffer = struct {
         const SIZE = std.mem.page_size;
 
         ptr: ErasedPtr,
 
-        pub fn init() Error!Chunk {
-            return Chunk{
+        pub fn init() Error!Buffer {
+            return Buffer{
                 .ptr = try getMemoryPages(SIZE / std.mem.page_size),
             };
         }
 
-        pub fn getBlocksCount(block_size: usize) usize {
-            std.debug.assert(block_size % BLOCK_SIZE_STEP == 0);
+        pub fn getChunksCount(chunk_size: usize) usize {
+            std.debug.assert(chunk_size % CHUNK_SIZE_STEP == 0);
 
-            return std.mem.page_size / block_size;
+            return std.mem.page_size / chunk_size;
         }
 
-        pub fn getNthBlock(self: Chunk, block_size: usize, n: usize) *FreeBlock {
-            std.debug.assert(block_size % BLOCK_SIZE_STEP == 0);
-            std.debug.assert(block_size * n < std.mem.page_size);
+        pub fn getNthChunk(self: Buffer, chunk_size: usize, n: usize) *FreeChunk {
+            std.debug.assert(chunk_size % CHUNK_SIZE_STEP == 0);
+            std.debug.assert(chunk_size * n < std.mem.page_size);
 
-            return @ptrCast(@alignCast(self.ptr + (block_size * n)));
+            return @ptrCast(@alignCast(self.ptr + (chunk_size * n)));
         }
     };
 
-    const Chunks = std.SinglyLinkedList(Chunk);
+    const Buffers = std.SinglyLinkedList(Buffer);
 
-    block_size: usize,
-    chunks: Chunks,
-    first_free_block: ?*FreeBlock,
+    chunk_size: usize,
+    buffers: Buffers,
+    first_free_chunk: ?*FreeChunk,
 
-    pub fn init(block_size: usize) SmallBlockArena {
-        return SmallBlockArena{
-            .chunks = .{},
-            .block_size = block_size,
-            .first_free_block = null,
+    pub fn init(chunk_size: usize) SmallChunkPool {
+        return .{
+            .buffers = .{},
+            .chunk_size = chunk_size,
+            .first_free_chunk = null,
         };
     }
 
-    pub fn deinit(self: *SmallBlockArena) void {
-        var cur_node = self.chunks.first;
+    pub fn deinit(self: *SmallChunkPool) void {
+        var cur_node = self.buffers.first;
         while (cur_node) |node| : (cur_node = cur_node.?.next) {
-            std.heap.page_allocator.free(node.data.ptr[0..Chunk.SIZE]);
+            std.heap.page_allocator.free(node.data.ptr[0..Buffer.SIZE]);
         }
     }
 
-    fn addNewChunk(self: *SmallBlockArena, node_mempool: *NodeMemPool) Error!void {
-        const new_node: *Chunks.Node = try node_mempool.create();
-        const new_chunk = try Chunk.init();
+    fn addNewBuffer(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!void {
+        const new_node: *Buffers.Node = try node_mempool.create();
+        const new_chunk = try Buffer.init();
         new_node.data = new_chunk;
-        self.chunks.prepend(new_node);
+        self.buffers.prepend(new_node);
 
-        for (0..Chunk.getBlocksCount(self.block_size) - 1) |i| {
-            var cur_block = new_chunk.getNthBlock(self.block_size, i);
-            cur_block.next = new_chunk.getNthBlock(self.block_size, i + 1);
+        for (0..Buffer.getChunksCount(self.chunk_size) - 1) |i| {
+            var cur_chunk = new_chunk.getNthChunk(self.chunk_size, i);
+            cur_chunk.next = new_chunk.getNthChunk(self.chunk_size, i + 1);
         }
-        new_chunk.getNthBlock(self.block_size, Chunk.getBlocksCount(self.block_size) - 1).next = null;
+        new_chunk.getNthChunk(self.chunk_size, Buffer.getChunksCount(self.chunk_size) - 1).next = null;
 
-        self.first_free_block = new_chunk.getNthBlock(self.block_size, 0);
+        self.first_free_chunk = new_chunk.getNthChunk(self.chunk_size, 0);
     }
 
-    pub fn putBlock(self: *SmallBlockArena, ptr: ErasedPtr) void {
-        const new_block: *FreeBlock = @ptrCast(ptr);
-        new_block.next = self.first_free_block;
-        self.first_free_block = new_block;
+    pub fn putChunk(self: *SmallChunkPool, ptr: ErasedPtr) void {
+        const new_chunk: *FreeChunk = @ptrCast(ptr);
+        new_chunk.next = self.first_free_chunk;
+        self.first_free_chunk = new_chunk;
     }
 
-    pub fn getBlock(self: *SmallBlockArena, node_mempool: *NodeMemPool) Error!ErasedPtr {
-        if (self.first_free_block == null) {
-            try self.addNewChunk(node_mempool);
+    pub fn getChunk(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!ErasedPtr {
+        if (self.first_free_chunk == null) {
+            try self.addNewBuffer(node_mempool);
         }
 
-        const result = self.first_free_block.?;
-        self.first_free_block = result.next;
+        const result = self.first_free_chunk.?;
+        self.first_free_chunk = result.next;
         return @ptrCast(result);
     }
 };
 
-const MediumBlockArena = struct {
-    const Chunk = struct {
-        const SIZE = MAX_MEDIUM_BLOCK_SIZE;
+const MediumChunkArena = struct {
+    const Buffer = struct {
+        const SIZE = MAX_MEDIUM_CHUNK_SIZE;
 
         header: Header,
         ptr: ErasedPtr,
@@ -123,12 +123,12 @@ const MediumBlockArena = struct {
 
             repr: ReprType,
 
-            fn blockHasChildren(index: IndexType) bool {
+            fn chunkHasChildren(index: IndexType) bool {
                 return (index + 1) < 32;
             }
 
             fn getChildrenMask(index: IndexType) ReprType {
-                if (!blockHasChildren(index)) {
+                if (!chunkHasChildren(index)) {
                     return 0;
                 }
 
@@ -151,42 +151,42 @@ const MediumBlockArena = struct {
                 return result;
             }
 
-            pub fn isBlockFree(self: Header, index: IndexType) bool {
+            pub fn isChunkFree(self: Header, index: IndexType) bool {
                 return ((self.repr & (@as(ReprType, @intCast(1)) << index)) |
                     (self.repr & getChildrenMask(index)) |
                     (self.repr & getParentMask(index))) == 0;
             }
 
-            pub fn markBlockFree(self: *Header, index: IndexType) void {
+            pub fn markChunkFree(self: *Header, index: IndexType) void {
                 self.repr &= ~(@as(ReprType, @intCast(1)) << index);
             }
 
-            pub fn markBlockAllocated(self: *Header, index: IndexType) void {
+            pub fn markChunkAllocated(self: *Header, index: IndexType) void {
                 self.repr |= @as(ReprType, @intCast(1)) << index;
             }
         };
 
-        pub fn init() Error!Chunk {
-            return Chunk{
+        pub fn init() Error!Buffer {
+            return Buffer{
                 .header = .{ .repr = 0 },
                 .ptr = try getMemoryPages(SIZE / std.mem.page_size),
             };
         }
 
-        pub fn getBlock(self: *Chunk, size: usize) ?ErasedPtr {
-            std.debug.assert(size >= MIN_MEDIUM_BLOCK_SIZE);
-            std.debug.assert(size <= MAX_MEDIUM_BLOCK_SIZE);
+        pub fn getChunk(self: *Buffer, size: usize) ?ErasedPtr {
+            std.debug.assert(size >= MIN_MEDIUM_CHUNK_SIZE);
+            std.debug.assert(size <= MAX_MEDIUM_CHUNK_SIZE);
             std.debug.assert(@popCount(size) == 1);
 
-            const blocks_to_check = Chunk.SIZE / size;
-            const starting_index = blocks_to_check - 1;
+            const chunks_to_check = Buffer.SIZE / size;
+            const starting_index = chunks_to_check - 1;
 
-            for (starting_index..(starting_index + blocks_to_check)) |i| {
-                if (self.header.isBlockFree(@intCast(i))) {
-                    self.header.markBlockAllocated(@intCast(i));
+            for (starting_index..(starting_index + chunks_to_check)) |i| {
+                if (self.header.isChunkFree(@intCast(i))) {
+                    self.header.markChunkAllocated(@intCast(i));
 
                     const result: ErasedPtr = @alignCast(self.ptr + size * (i - starting_index));
-                    std.debug.assert(self.ownsBlock(result));
+                    std.debug.assert(self.ownsChunk(result));
                     return result;
                 }
             }
@@ -194,39 +194,39 @@ const MediumBlockArena = struct {
             return null;
         }
 
-        pub fn putBlock(self: *Chunk, ptr: ErasedPtr, size: usize) void {
-            std.debug.assert(self.ownsBlock(ptr));
-            std.debug.assert(size >= MIN_MEDIUM_BLOCK_SIZE);
-            std.debug.assert(size <= MAX_MEDIUM_BLOCK_SIZE);
+        pub fn putChunk(self: *Buffer, ptr: ErasedPtr, size: usize) void {
+            std.debug.assert(self.ownsChunk(ptr));
+            std.debug.assert(size >= MIN_MEDIUM_CHUNK_SIZE);
+            std.debug.assert(size <= MAX_MEDIUM_CHUNK_SIZE);
             std.debug.assert(@popCount(size) == 1);
 
             const index: u6 = @intCast((@intFromPtr(ptr) - @intFromPtr(self.ptr)) / size);
-            self.header.markBlockFree(index);
+            self.header.markChunkFree(index);
         }
 
-        pub fn ownsBlock(self: Chunk, ptr: ErasedPtr) bool {
+        pub fn ownsChunk(self: Buffer, ptr: ErasedPtr) bool {
             return @intFromPtr(ptr) >= @intFromPtr(self.ptr) and
-                @intFromPtr(ptr) - @intFromPtr(self.ptr) <= Chunk.SIZE;
+                @intFromPtr(ptr) - @intFromPtr(self.ptr) <= Buffer.SIZE;
         }
     };
 
-    const Chunks = std.SinglyLinkedList(Chunk);
-    const NodeMemPool = std.heap.MemoryPool(Chunks.Node);
+    const Buffers = std.SinglyLinkedList(Buffer);
+    const NodeMemPool = std.heap.MemoryPool(Buffers.Node);
 
-    chunks: Chunks = .{},
+    chunks: Buffers = .{},
 
-    pub fn deinit(self: *MediumBlockArena) void {
+    pub fn deinit(self: *MediumChunkArena) void {
         var cur_node = self.chunks.first;
         while (cur_node) |node| : (cur_node = cur_node.?.next) {
-            std.heap.page_allocator.free(node.data.ptr[0..Chunk.SIZE]);
+            std.heap.page_allocator.free(node.data.ptr[0..Buffer.SIZE]);
         }
     }
 
-    pub fn putBlock(self: *MediumBlockArena, ptr: ErasedPtr, size: usize) void {
+    pub fn putChunk(self: *MediumChunkArena, ptr: ErasedPtr, size: usize) void {
         var cur_node = self.chunks.first;
         while (cur_node) |node| {
-            if (node.data.ownsBlock(ptr)) {
-                node.data.putBlock(ptr, size);
+            if (node.data.ownsChunk(ptr)) {
+                node.data.putChunk(ptr, size);
                 return;
             }
 
@@ -241,31 +241,31 @@ const MediumBlockArena = struct {
         return std.math.shl(usize, @as(usize, @intCast(1)), shift);
     }
 
-    pub fn getBlock(self: *MediumBlockArena, node_mempool: *NodeMemPool, requested_size: usize) Error!ErasedPtr {
+    pub fn getChunk(self: *MediumChunkArena, node_mempool: *NodeMemPool, requested_size: usize) Error!ErasedPtr {
         const size = roundSize(requested_size);
 
         var cur_node = self.chunks.first;
         while (cur_node) |node| {
-            if (node.data.getBlock(size)) |ptr| {
+            if (node.data.getChunk(size)) |ptr| {
                 return ptr;
             }
             cur_node = node.next;
         }
 
-        // didn't find any blocks, have to add new chunk
+        // didn't find any chunks, have to add new chunk
         cur_node = try node_mempool.create();
-        cur_node.?.data = try Chunk.init();
+        cur_node.?.data = try Buffer.init();
         self.chunks.prepend(cur_node.?);
 
-        return cur_node.?.data.getBlock(size).?;
+        return cur_node.?.data.getChunk(size).?;
     }
 };
 
-const AllocatedBlock = struct {
+const AllocatedChunk = struct {
     payload: ErasedPtr,
     size: usize,
 
-    fn cmp(a: AllocatedBlock, b: AllocatedBlock) std.math.Order {
+    fn cmp(a: AllocatedChunk, b: AllocatedChunk) std.math.Order {
         return std.math.order(@intFromPtr(a.payload), @intFromPtr(b.payload));
     }
 };
@@ -273,42 +273,43 @@ const AllocatedBlock = struct {
 pub const SpAllocator = struct {
     const Self = @This();
 
-    const AllocatedBlocks = std.Treap(AllocatedBlock, AllocatedBlock.cmp);
-    const AllocatedBlocksNodeMemPool = std.heap.MemoryPool(AllocatedBlocks.Node);
+    const AllocatedChunks = std.Treap(AllocatedChunk, AllocatedChunk.cmp);
+    const AllocatedChunksNodeMemPool = std.heap.MemoryPool(AllocatedChunks.Node);
 
-    const SMALL_BLOCK_ARENAS_COUNT = MAX_SMALL_BLOCK_SIZE / BLOCK_SIZE_STEP;
+    const SMALL_CHUNK_POOLS_COUNT = MAX_SMALL_CHUNK_SIZE / CHUNK_SIZE_STEP;
 
-    small_arena_node_mempool: SmallBlockArena.NodeMemPool,
-    small_arenas: [SMALL_BLOCK_ARENAS_COUNT]SmallBlockArena,
+    small_chunk_pools_node_mempool: SmallChunkPool.NodeMemPool,
+    small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool,
 
-    medium_arena_node_mempool: MediumBlockArena.NodeMemPool,
-    medium_arena: MediumBlockArena,
+    medium_chunk_arena_node_mempool: MediumChunkArena.NodeMemPool,
+    medium_chunk_arena: MediumChunkArena,
 
-    allocated_blocks_node_mempool: AllocatedBlocksNodeMemPool,
-    allocated_blocks: AllocatedBlocks,
+    allocated_chunks_node_mempool: AllocatedChunksNodeMemPool,
+    allocated_chunks: AllocatedChunks,
 
     pub fn init() Self {
-        var small_block_arenas = [_]SmallBlockArena{undefined} ** SMALL_BLOCK_ARENAS_COUNT;
-        for (0..SMALL_BLOCK_ARENAS_COUNT) |i| {
-            const cur_block_size = (i + 1) * BLOCK_SIZE_STEP;
-            std.debug.assert(MIN_BLOCK_SIZE <= cur_block_size);
-            std.debug.assert(cur_block_size <= MAX_SMALL_BLOCK_SIZE);
-            std.debug.assert(cur_block_size % BLOCK_SIZE_STEP == 0);
+        var small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool =
+            [_]SmallChunkPool{undefined} ** SMALL_CHUNK_POOLS_COUNT;
+        for (0..SMALL_CHUNK_POOLS_COUNT) |i| {
+            const cur_chunk_size = (i + 1) * CHUNK_SIZE_STEP;
+            std.debug.assert(MIN_CHUNK_SIZE <= cur_chunk_size);
+            std.debug.assert(cur_chunk_size <= MAX_SMALL_CHUNK_SIZE);
+            std.debug.assert(cur_chunk_size % CHUNK_SIZE_STEP == 0);
 
-            small_block_arenas[i] = SmallBlockArena.init(cur_block_size);
+            small_chunk_pools[i] = SmallChunkPool.init(cur_chunk_size);
         }
 
-        const small_arena_node_mempool = SmallBlockArena.NodeMemPool.init(std.heap.page_allocator);
-        const medium_arena_node_mempool = MediumBlockArena.NodeMemPool.init(std.heap.page_allocator);
-        const allocated_blocks_node_mempool = AllocatedBlocksNodeMemPool.init(std.heap.page_allocator);
+        const small_chunk_pools_node_mempool = SmallChunkPool.NodeMemPool.init(std.heap.page_allocator);
+        const medium_chunk_arena_node_mempool = MediumChunkArena.NodeMemPool.init(std.heap.page_allocator);
+        const allocated_chunks_node_mempool = AllocatedChunksNodeMemPool.init(std.heap.page_allocator);
 
         return Self{
-            .small_arena_node_mempool = small_arena_node_mempool,
-            .small_arenas = small_block_arenas,
-            .medium_arena_node_mempool = medium_arena_node_mempool,
-            .medium_arena = MediumBlockArena{},
-            .allocated_blocks_node_mempool = allocated_blocks_node_mempool,
-            .allocated_blocks = AllocatedBlocks{},
+            .small_chunk_pools_node_mempool = small_chunk_pools_node_mempool,
+            .small_chunk_pools = small_chunk_pools,
+            .medium_chunk_arena_node_mempool = medium_chunk_arena_node_mempool,
+            .medium_chunk_arena = MediumChunkArena{},
+            .allocated_chunks_node_mempool = allocated_chunks_node_mempool,
+            .allocated_chunks = AllocatedChunks{},
         };
     }
 
@@ -318,7 +319,7 @@ pub const SpAllocator = struct {
     };
 
     pub fn detectLeaks(self: Self) LeakCheckResult {
-        if (self.allocated_blocks.root != null) {
+        if (self.allocated_chunks.root != null) {
             return .leak;
         }
         return .ok;
@@ -327,34 +328,34 @@ pub const SpAllocator = struct {
     pub fn deinit(self: *Self, report_leaks: bool) LeakCheckResult {
         const result = self.detectLeaks();
         if (result == .leak and report_leaks) {
-            var iter = self.allocated_blocks.inorderIterator();
+            var iter = self.allocated_chunks.inorderIterator();
 
             while (iter.next()) |node| {
                 std.log.err("Memory leak of address 0x{x} detected", .{@intFromPtr(node.key.payload)});
             }
         }
 
-        for (self.small_arenas[0..SMALL_BLOCK_ARENAS_COUNT]) |*arena| {
-            arena.deinit();
+        for (self.small_chunk_pools[0..SMALL_CHUNK_POOLS_COUNT]) |*pool| {
+            pool.deinit();
         }
-        self.medium_arena.deinit();
-        self.small_arena_node_mempool.deinit();
-        self.allocated_blocks_node_mempool.deinit();
+        self.medium_chunk_arena.deinit();
+        self.small_chunk_pools_node_mempool.deinit();
+        self.allocated_chunks_node_mempool.deinit();
         return result;
     }
 
-    fn getSmallBlockArenaIndex(size: usize) usize {
-        std.debug.assert(MIN_BLOCK_SIZE <= size);
-        std.debug.assert(size <= MAX_SMALL_BLOCK_SIZE);
-        std.debug.assert(size % BLOCK_SIZE_STEP == 0);
+    fn getSmallChunkPoolIndex(size: usize) usize {
+        std.debug.assert(MIN_CHUNK_SIZE <= size);
+        std.debug.assert(size <= MAX_SMALL_CHUNK_SIZE);
+        std.debug.assert(size % CHUNK_SIZE_STEP == 0);
 
-        const result = size / BLOCK_SIZE_STEP - 1;
-        std.debug.assert(result < SMALL_BLOCK_ARENAS_COUNT);
+        const result = size / CHUNK_SIZE_STEP - 1;
+        std.debug.assert(result < SMALL_CHUNK_POOLS_COUNT);
         return result;
     }
 
-    fn getBlockSize(self: *Self, ptr: ErasedPtr) ?usize {
-        const entry = self.allocated_blocks.getEntryFor(AllocatedBlock{ .payload = ptr, .size = undefined });
+    fn getchunkSize(self: *Self, ptr: ErasedPtr) ?usize {
+        const entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr, .size = undefined });
         if (entry.node) |node| {
             return node.key.size;
         }
@@ -362,13 +363,13 @@ pub const SpAllocator = struct {
         return null;
     }
 
-    fn markBlockAllocated(self: *Self, block_ptr: ErasedPtr, block_size: usize) Error!void {
-        const allocated_block_header = AllocatedBlock{ .payload = block_ptr, .size = block_size };
+    fn markchunkAllocated(self: *Self, chunk_ptr: ErasedPtr, chunk_size: usize) Error!void {
+        const allocated_chunk_header = AllocatedChunk{ .payload = chunk_ptr, .size = chunk_size };
 
-        const new_node: *AllocatedBlocks.Node = try self.allocated_blocks_node_mempool.create();
-        new_node.key = allocated_block_header;
+        const new_node: *AllocatedChunks.Node = try self.allocated_chunks_node_mempool.create();
+        new_node.key = allocated_chunk_header;
 
-        var entry = self.allocated_blocks.getEntryFor(allocated_block_header);
+        var entry = self.allocated_chunks.getEntryFor(allocated_chunk_header);
         std.debug.assert(entry.node == null);
 
         entry.set(new_node);
@@ -378,18 +379,18 @@ pub const SpAllocator = struct {
         var size: usize = undefined;
         var ptr: ErasedPtr = undefined;
 
-        size = std.mem.alignForward(usize, requested_size, BLOCK_SIZE_STEP);
+        size = std.mem.alignForward(usize, requested_size, CHUNK_SIZE_STEP);
         switch (size) {
-            0...MAX_SMALL_BLOCK_SIZE => {
-                const arena_index = getSmallBlockArenaIndex(size);
+            0...MAX_SMALL_CHUNK_SIZE => {
+                const pool_index = getSmallChunkPoolIndex(size);
 
-                std.debug.assert(self.small_arenas[arena_index].block_size == size);
+                std.debug.assert(self.small_chunk_pools[pool_index].chunk_size == size);
 
-                ptr = try self.small_arenas[arena_index].getBlock(&self.small_arena_node_mempool);
+                ptr = try self.small_chunk_pools[pool_index].getChunk(&self.small_chunk_pools_node_mempool);
             },
-            (MAX_SMALL_BLOCK_SIZE + 1)...MAX_MEDIUM_BLOCK_SIZE => {
-                size = MediumBlockArena.roundSize(requested_size);
-                ptr = try self.medium_arena.getBlock(&self.medium_arena_node_mempool, size);
+            (MAX_SMALL_CHUNK_SIZE + 1)...MAX_MEDIUM_CHUNK_SIZE => {
+                size = MediumChunkArena.roundSize(requested_size);
+                ptr = try self.medium_chunk_arena.getChunk(&self.medium_chunk_arena_node_mempool, size);
             },
             else => {
                 size = std.mem.alignForward(usize, requested_size, std.mem.page_size);
@@ -397,7 +398,7 @@ pub const SpAllocator = struct {
             },
         }
 
-        try self.markBlockAllocated(ptr, size);
+        try self.markchunkAllocated(ptr, size);
 
         return ptr;
     }
@@ -412,31 +413,31 @@ pub const SpAllocator = struct {
         InvalidAddress,
     };
     pub fn realloc(self: *Self, ptr: *anyopaque, size: usize) !ErasedPtr {
-        if (!std.mem.isAligned(@intFromPtr(ptr), BLOCK_ALIGNMENT)) {
+        if (!std.mem.isAligned(@intFromPtr(ptr), CHUNK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
 
         const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
-        const block_size = self.getBlockSize(ptr_casted);
-        if (block_size == null) {
+        const chunk_size = self.getchunkSize(ptr_casted);
+        if (chunk_size == null) {
             return FreeError.InvalidAddress;
-        } else if (block_size.? >= size) {
+        } else if (chunk_size.? >= size) {
             return ptr_casted;
         }
 
         const new_data = try self.malloc(size);
-        @memcpy(new_data[0..block_size.?], ptr_casted[0..block_size.?]);
+        @memcpy(new_data[0..chunk_size.?], ptr_casted[0..chunk_size.?]);
         self.free(ptr) catch @panic("`free` in `realloc` breaked unexpectedly");
 
         return new_data;
     }
 
     pub fn free(self: *Self, ptr: *anyopaque) FreeError!void {
-        if (!std.mem.isAligned(@intFromPtr(ptr), BLOCK_ALIGNMENT)) {
+        if (!std.mem.isAligned(@intFromPtr(ptr), CHUNK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
 
-        var entry = self.allocated_blocks.getEntryFor(AllocatedBlock{
+        var entry = self.allocated_chunks.getEntryFor(AllocatedChunk{
             .payload = @ptrCast(@alignCast(ptr)),
             .size = undefined,
         });
@@ -444,16 +445,16 @@ pub const SpAllocator = struct {
             return FreeError.InvalidAddress;
         }
 
-        const block = entry.node.?.key;
+        const chunk = entry.node.?.key;
         entry.set(null);
 
-        if (block.size <= MAX_SMALL_BLOCK_SIZE) {
-            const arena_index = getSmallBlockArenaIndex(block.size);
-            self.small_arenas[arena_index].putBlock(block.payload);
-        } else if (block.size <= MAX_MEDIUM_BLOCK_SIZE) {
-            self.medium_arena.putBlock(block.payload, block.size);
+        if (chunk.size <= MAX_SMALL_CHUNK_SIZE) {
+            const pool_index = getSmallChunkPoolIndex(chunk.size);
+            self.small_chunk_pools[pool_index].putChunk(chunk.payload);
+        } else if (chunk.size <= MAX_MEDIUM_CHUNK_SIZE) {
+            self.medium_chunk_arena.putChunk(chunk.payload, chunk.size);
         } else {
-            std.heap.page_allocator.free(block.payload[0..block.size]);
+            std.heap.page_allocator.free(chunk.payload[0..chunk.size]);
         }
     }
 };
@@ -522,9 +523,9 @@ pub export fn spfree(ptr: ?*anyopaque) void {
 }
 
 test "round size" {
-    try std.testing.expectEqual(256, MediumBlockArena.roundSize(142));
-    try std.testing.expectEqual(256, MediumBlockArena.roundSize(256));
-    try std.testing.expectEqual(512, MediumBlockArena.roundSize(257));
+    try std.testing.expectEqual(256, MediumChunkArena.roundSize(142));
+    try std.testing.expectEqual(256, MediumChunkArena.roundSize(256));
+    try std.testing.expectEqual(512, MediumChunkArena.roundSize(257));
 }
 
 test "basic" {
@@ -545,35 +546,35 @@ test "basic" {
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
 
-test "medium size blocks" {
+test "medium size chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    var p: [*]u8 = try allocator.malloc(MAX_SMALL_BLOCK_SIZE + 15);
-    p[MAX_SMALL_BLOCK_SIZE + 14] = 42;
+    var p: [*]u8 = try allocator.malloc(MAX_SMALL_CHUNK_SIZE + 15);
+    p[MAX_SMALL_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MIN_MEDIUM_BLOCK_SIZE * 4);
-    p[MIN_MEDIUM_BLOCK_SIZE * 4 - 3] = 42;
+    p = try allocator.malloc(MIN_MEDIUM_CHUNK_SIZE * 4);
+    p[MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MAX_MEDIUM_BLOCK_SIZE);
-    p[MAX_MEDIUM_BLOCK_SIZE - 3] = 42;
+    p = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE);
+    p[MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
 
-test "large blocks" {
+test "large chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    var p: [*]u8 = try allocator.malloc(MAX_MEDIUM_BLOCK_SIZE + 15);
-    p[MAX_MEDIUM_BLOCK_SIZE + 14] = 42;
+    var p: [*]u8 = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE + 15);
+    p[MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MAX_MEDIUM_BLOCK_SIZE * 2);
-    p[MAX_MEDIUM_BLOCK_SIZE * 2 - 3] = 42;
+    p = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2);
+    p[MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
