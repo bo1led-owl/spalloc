@@ -185,7 +185,9 @@ const MediumBlockArena = struct {
                 if (self.header.isBlockFree(@intCast(i))) {
                     self.header.markBlockAllocated(@intCast(i));
 
-                    return @alignCast(self.ptr + size * (i - starting_index));
+                    const result: ErasedPtr = @alignCast(self.ptr + size * (i - starting_index));
+                    std.debug.assert(self.ownsBlock(result));
+                    return result;
                 }
             }
 
