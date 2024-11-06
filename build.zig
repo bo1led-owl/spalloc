@@ -6,22 +6,16 @@ pub fn build(b: *std.Build) void {
 
     const shared = b.option(bool, "shared", "Build shared library") orelse false;
 
-    const should_strip = optimize != std.builtin.OptimizeMode.Debug;
-    const lib = if (!shared) b.addStaticLibrary(.{
+    const lib_options = .{
         .name = "spalloc",
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = should_strip,
+        .strip = optimize != std.builtin.OptimizeMode.Debug,
         .link_libc = true,
-    }) else b.addSharedLibrary(.{
-        .name = "spalloc",
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .strip = should_strip,
-        .link_libc = true,
-    });
+    };
+
+    const lib = if (!shared) b.addStaticLibrary(lib_options) else b.addSharedLibrary(lib_options);
 
     b.installArtifact(lib);
 
