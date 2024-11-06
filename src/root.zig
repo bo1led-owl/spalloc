@@ -14,6 +14,10 @@ const MAX_MEDIUM_CHUNK_SIZE = 8 * KiB;
 const CHUNK_SIZE_STEP = 16;
 const CHUNK_ALIGNMENT = 8;
 
+const ZERO_SIZE_ALLOCATION_ADDRESS: ErasedPtr = @ptrFromInt(0xbebebe00);
+
+const ErasedPtr = [*]align(CHUNK_ALIGNMENT) u8;
+
 const FreeChunk = struct {
     next: ?*FreeChunk,
 };
@@ -22,8 +26,6 @@ comptime {
     std.debug.assert(@sizeOf(FreeChunk) <= MIN_CHUNK_SIZE);
     std.debug.assert(@alignOf(FreeChunk) == CHUNK_ALIGNMENT);
 }
-
-const ErasedPtr = [*]align(CHUNK_ALIGNMENT) u8;
 
 fn getMemoryPages(n: usize) Error!ErasedPtr {
     return (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, n * std.mem.page_size)).ptr;
@@ -376,6 +378,10 @@ pub const SpAllocator = struct {
     }
 
     pub fn malloc(self: *Self, requested_size: usize) Error!ErasedPtr {
+        if (requested_size == 0) {
+            return ZERO_SIZE_ALLOCATION_ADDRESS;
+        }
+
         var size: usize = undefined;
         var ptr: ErasedPtr = undefined;
 
@@ -412,7 +418,11 @@ pub const SpAllocator = struct {
     pub const FreeError = error{
         InvalidAddress,
     };
-    pub fn realloc(self: *Self, ptr: *anyopaque, size: usize) !ErasedPtr {
+    pub fn realloc(self: *Self, ptr: ?*anyopaque, size: usize) !ErasedPtr {
+        if (ptr == null) {
+            return self.malloc(size);
+        }
+
         if (!std.mem.isAligned(@intFromPtr(ptr), CHUNK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
@@ -432,7 +442,11 @@ pub const SpAllocator = struct {
         return new_data;
     }
 
-    pub fn free(self: *Self, ptr: *anyopaque) FreeError!void {
+    pub fn free(self: *Self, ptr: ?*anyopaque) FreeError!void {
+        if (ptr == null) {
+            return;
+        }
+
         if (!std.mem.isAligned(@intFromPtr(ptr), CHUNK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
@@ -492,13 +506,9 @@ pub export fn spcalloc(n: usize, elem_size: usize) callconv(.C) ?*anyopaque {
 }
 
 pub export fn sprealloc(ptr: ?*anyopaque, size: usize) callconv(.C) ?*anyopaque {
-    if (ptr == null) {
-        return null;
-    }
-
     ensureAllocatorIsInitialized();
 
-    return allocator.realloc(@ptrCast(@alignCast(ptr.?)), size) catch |err| switch (err) {
+    return allocator.realloc(@ptrCast(@alignCast(ptr)), size) catch |err| switch (err) {
         error.InvalidAddress => {
             std.log.err("`realloc` of invalid address 0x{x}", .{@intFromPtr(ptr.?)});
             std.process.abort();
@@ -508,13 +518,9 @@ pub export fn sprealloc(ptr: ?*anyopaque, size: usize) callconv(.C) ?*anyopaque 
 }
 
 pub export fn spfree(ptr: ?*anyopaque) void {
-    if (ptr == null) {
-        return;
-    }
-
     ensureAllocatorIsInitialized();
 
-    allocator.free(@ptrCast(ptr.?)) catch |err| switch (err) {
+    allocator.free(@ptrCast(ptr)) catch |err| switch (err) {
         error.InvalidAddress => {
             std.log.err("`free` of invalid address 0x{x}", .{@intFromPtr(ptr.?)});
             std.process.abort();
@@ -526,6 +532,20 @@ test "round size" {
     try std.testing.expectEqual(256, MediumChunkArena.roundSize(142));
     try std.testing.expectEqual(256, MediumChunkArena.roundSize(256));
     try std.testing.expectEqual(512, MediumChunkArena.roundSize(257));
+}
+
+test "zero size allocation" {
+    allocator = SpAllocator.init();
+    defer std.debug.assert(allocator.deinit(false) == .ok);
+
+    try std.testing.expectEqual(ZERO_SIZE_ALLOCATION_ADDRESS, try allocator.malloc(0));
+}
+
+test "null free" {
+    allocator = SpAllocator.init();
+    defer std.debug.assert(allocator.deinit(false) == .ok);
+
+    try std.testing.expect(allocator.free(null) != SpAllocator.FreeError.InvalidAddress);
 }
 
 test "basic" {
