@@ -1,5 +1,8 @@
 const std = @import("std");
-const libc = @cImport(@cInclude("stdlib.h"));
+const libc = @cImport({
+    @cInclude("stdlib.h");
+    @cInclude("string.h");
+});
 
 const Error = std.mem.Allocator.Error;
 
@@ -211,6 +214,50 @@ const MediumChunkArena = struct {
             return @intFromPtr(ptr) >= @intFromPtr(self.ptr) and
                 @intFromPtr(ptr) - @intFromPtr(self.ptr) <= Buffer.SIZE;
         }
+
+        pub fn tryResizeChunk(self: *Buffer, chunk: ErasedPtr, cur_size: usize, new_size: usize) ?ErasedPtr {
+            std.debug.assert(cur_size < new_size);
+
+            const original_chunk: u7 = @intCast(Buffer.SIZE / cur_size + (@intFromPtr(chunk) - @intFromPtr(self.ptr)) / cur_size);
+
+            const chunks_to_check = Buffer.SIZE / new_size;
+            const starting_index = chunks_to_check - 1;
+
+            // to not obstruct the checks later
+            self.header.markChunkFree(original_chunk);
+
+            var result_ptr: ?ErasedPtr = null;
+            var result_index: Header.IndexType = undefined;
+            var min_dist: usize = std.math.maxInt(usize);
+            const original_chunk_int_ptr = @intFromPtr(chunk);
+            for (starting_index..(starting_index + chunks_to_check)) |i| {
+                if (!self.header.repr.isSet(@intCast(i)) and self.header.areChildrenFree(@intCast(i))) {
+                    const cur_chunk_ptr: ErasedPtr = @alignCast(self.ptr + new_size * (i - starting_index));
+                    const cur_chunk_int_ptr = @intFromPtr(cur_chunk_ptr);
+
+                    if (original_chunk_int_ptr == cur_chunk_int_ptr) {
+                        self.header.markChunkAllocated(@intCast(i));
+                        return chunk;
+                    }
+
+                    const dist = if (original_chunk_int_ptr < cur_chunk_int_ptr) cur_chunk_int_ptr - original_chunk_int_ptr else original_chunk_int_ptr - cur_chunk_int_ptr;
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        result_ptr = cur_chunk_ptr;
+                        result_index = @intCast(i);
+                    }
+                }
+            }
+
+            if (result_ptr) |ptr| {
+                _ = libc.memmove(ptr, chunk, cur_size);
+                self.header.markChunkAllocated(@intCast(result_index));
+                return ptr;
+            }
+
+            self.header.markChunkAllocated(@intCast(original_chunk));
+            return null;
+        }
     };
 
     const Buffers = std.SinglyLinkedList(Buffer);
@@ -266,6 +313,17 @@ const MediumChunkArena = struct {
         // couldn't find any chunks, have to add new buffer
         var new_buffer = try self.addNewBuffer(node_mempool);
         return new_buffer.getChunk(size).?;
+    }
+
+    pub fn tryResizeChunk(self: *MediumChunkArena, chunk: ErasedPtr, cur_size: usize, new_size: usize) ?ErasedPtr {
+        var cur_node = self.buffers.first;
+        while (cur_node) |node| : (cur_node = cur_node.?.next) {
+            if (node.data.ownsChunk(chunk)) {
+                return node.data.tryResizeChunk(chunk, cur_size, new_size);
+            }
+        }
+
+        unreachable;
     }
 };
 
@@ -428,9 +486,9 @@ pub const SpAllocator = struct {
     pub const FreeError = error{
         InvalidAddress,
     };
-    pub fn realloc(self: *Self, ptr: ?*anyopaque, size: usize) !ErasedPtr {
+    pub fn realloc(self: *Self, ptr: ?*anyopaque, requested_size: usize) !ErasedPtr {
         if (ptr == null) {
-            return self.malloc(size);
+            return self.malloc(requested_size);
         }
 
         if (!std.mem.isAligned(@intFromPtr(ptr), CHUNK_ALIGNMENT)) {
@@ -438,18 +496,40 @@ pub const SpAllocator = struct {
         }
 
         const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
-        const chunk_size = self.getChunkSize(ptr_casted);
-        if (chunk_size == null) {
+        var chunk_entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr_casted, .size = undefined });
+        if (chunk_entry.node == null) {
             return FreeError.InvalidAddress;
-        } else if (chunk_size.? >= size) {
+        }
+
+        var node = chunk_entry.node.?;
+        const cur_size = node.key.size;
+
+        if (cur_size >= requested_size) {
             return ptr_casted;
         }
 
-        const new_data = try self.malloc(size);
-        @memcpy(new_data[0..chunk_size.?], ptr_casted[0..chunk_size.?]);
-        self.free(ptr) catch @panic("`free` in `realloc` breaked unexpectedly");
+        if (MAX_SMALL_CHUNK_SIZE < cur_size and cur_size <= MAX_MEDIUM_CHUNK_SIZE and
+            MAX_SMALL_CHUNK_SIZE < requested_size and requested_size <= MAX_MEDIUM_CHUNK_SIZE)
+        {
+            const new_size = MediumChunkArena.roundSize(requested_size);
 
-        return new_data;
+            const result = self.medium_chunk_arena.tryResizeChunk(ptr_casted, cur_size, new_size);
+            if (result) |res_ptr| {
+                chunk_entry.set(null);
+                node.key = AllocatedChunk{ .payload = res_ptr, .size = new_size };
+                
+                var entry = self.allocated_chunks.getEntryFor(node.key);
+                entry.set(node);
+
+                return res_ptr;
+            }
+        }
+
+        const result = try self.malloc(requested_size);
+        @memcpy(result[0..cur_size], ptr_casted[0..cur_size]);
+        self.free(ptr) catch @panic("`free` in `realloc` broke unexpectedly");
+
+        return result;
     }
 
     pub fn free(self: *Self, ptr: ?*anyopaque) FreeError!void {
