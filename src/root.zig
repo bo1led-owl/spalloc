@@ -7,9 +7,9 @@ const KiB = 1024;
 const MiB = 1024 * KiB;
 
 const MIN_CHUNK_SIZE = 16;
-const MAX_SMALL_CHUNK_SIZE = 128;
+const MAX_SMALL_CHUNK_SIZE = 256;
 const MIN_MEDIUM_CHUNK_SIZE = MAX_SMALL_CHUNK_SIZE * 2;
-const MAX_MEDIUM_CHUNK_SIZE = 8 * KiB;
+const MAX_MEDIUM_CHUNK_SIZE = 32 * KiB;
 
 const CHUNK_SIZE_STEP = 16;
 const CHUNK_ALIGNMENT = 8;
@@ -35,7 +35,7 @@ const SmallChunkPool = struct {
     const NodeMemPool = std.heap.MemoryPool(Buffers.Node);
 
     const Buffer = struct {
-        const SIZE = std.mem.page_size;
+        const SIZE = 4 * std.mem.page_size;
 
         ptr: ErasedPtr,
 
@@ -120,57 +120,58 @@ const MediumChunkArena = struct {
         ptr: ErasedPtr,
 
         pub const Header = struct {
-            const ReprType = u63;
-            const IndexType = u6;
+            const SMALLEST_CHUNKS_COUNT = MAX_MEDIUM_CHUNK_SIZE / MIN_MEDIUM_CHUNK_SIZE;
+            const BITS = 2 * SMALLEST_CHUNKS_COUNT - 1;
+
+            const ReprType = std.StaticBitSet(BITS);
+            const IndexType = std.math.IntFittingRange(0, SMALLEST_CHUNKS_COUNT);
 
             repr: ReprType,
 
             fn chunkHasChildren(index: IndexType) bool {
-                return (index + 1) < 32;
+                return (index + 1) < SMALLEST_CHUNKS_COUNT;
             }
 
-            fn getChildrenMask(index: IndexType) ReprType {
+            fn areChildrenFree(self: Header, index: IndexType) bool {
                 if (!chunkHasChildren(index)) {
-                    return 0;
+                    return true;
                 }
 
                 const l_child = 2 * (index + 1) - 1;
                 const r_child = 2 * (index + 1) + 1 - 1;
-                return (@as(ReprType, @intCast(1)) << l_child) |
-                    (@as(ReprType, @intCast(1)) << r_child) |
-                    getChildrenMask(l_child) |
-                    getChildrenMask(r_child);
+                return !self.repr.isSet(l_child) and !self.repr.isSet(r_child) and
+                    self.areChildrenFree(l_child) and self.areChildrenFree(r_child);
             }
 
-            fn getParentMask(index: IndexType) ReprType {
-                var result: ReprType = 0;
-
+            fn areParentsFree(self: Header, index: IndexType) bool {
                 var i = (index + 1) / 2;
                 while (i > 0) : (i /= 2) {
-                    result |= @as(ReprType, @intCast(1)) << (i - 1);
+                    if (self.repr.isSet(i - 1)) {
+                        return false;
+                    }
                 }
 
-                return result;
+                return true;
             }
 
             pub fn isChunkFree(self: Header, index: IndexType) bool {
-                return ((self.repr & (@as(ReprType, @intCast(1)) << index)) |
-                    (self.repr & getChildrenMask(index)) |
-                    (self.repr & getParentMask(index))) == 0;
+                return !self.repr.isSet(index) and
+                    self.areChildrenFree(index) and
+                    self.areParentsFree(index);
             }
 
             pub fn markChunkFree(self: *Header, index: IndexType) void {
-                self.repr &= ~(@as(ReprType, @intCast(1)) << index);
+                self.repr.setValue(index, false);
             }
 
             pub fn markChunkAllocated(self: *Header, index: IndexType) void {
-                self.repr |= @as(ReprType, @intCast(1)) << index;
+                self.repr.set(index);
             }
         };
 
         pub fn init() Error!Buffer {
             return Buffer{
-                .header = .{ .repr = 0 },
+                .header = .{ .repr = Header.ReprType.initEmpty() },
                 .ptr = try getMemoryPages(SIZE / std.mem.page_size),
             };
         }
@@ -356,7 +357,7 @@ pub const SpAllocator = struct {
         return result;
     }
 
-    fn getchunkSize(self: *Self, ptr: ErasedPtr) ?usize {
+    fn getChunkSize(self: *Self, ptr: ErasedPtr) ?usize {
         const entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr, .size = undefined });
         if (entry.node) |node| {
             return node.key.size;
@@ -365,7 +366,7 @@ pub const SpAllocator = struct {
         return null;
     }
 
-    fn markchunkAllocated(self: *Self, chunk_ptr: ErasedPtr, chunk_size: usize) Error!void {
+    fn markChunkAllocated(self: *Self, chunk_ptr: ErasedPtr, chunk_size: usize) Error!void {
         const allocated_chunk_header = AllocatedChunk{ .payload = chunk_ptr, .size = chunk_size };
 
         const new_node: *AllocatedChunks.Node = try self.allocated_chunks_node_mempool.create();
@@ -399,12 +400,16 @@ pub const SpAllocator = struct {
                 ptr = try self.medium_chunk_arena.getChunk(&self.medium_chunk_arena_node_mempool, size);
             },
             else => {
-                size = std.mem.alignForward(usize, requested_size, std.mem.page_size);
+                if (std.math.maxInt(usize) - requested_size < std.mem.page_size) {
+                    size = std.math.maxInt(usize);
+                } else {
+                    size = std.mem.alignForward(usize, requested_size, std.mem.page_size);
+                }
                 ptr = (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, size)).ptr;
             },
         }
 
-        try self.markchunkAllocated(ptr, size);
+        try self.markChunkAllocated(ptr, size);
 
         return ptr;
     }
@@ -428,7 +433,7 @@ pub const SpAllocator = struct {
         }
 
         const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
-        const chunk_size = self.getchunkSize(ptr_casted);
+        const chunk_size = self.getChunkSize(ptr_casted);
         if (chunk_size == null) {
             return FreeError.InvalidAddress;
         } else if (chunk_size.? >= size) {
@@ -596,6 +601,19 @@ test "large chunks" {
     p = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2);
     p[MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
     try allocator.free(p);
+
+    try std.testing.expectEqual(.ok, allocator.detectLeaks());
+}
+
+test "out of memory" {
+    allocator = SpAllocator.init();
+    defer std.debug.assert(allocator.deinit(false) == .ok);
+
+    var size: usize = std.math.maxInt(usize);
+    size -= size % CHUNK_SIZE_STEP;
+
+    const p = allocator.malloc(size);
+    try std.testing.expectEqual(Error.OutOfMemory, p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
