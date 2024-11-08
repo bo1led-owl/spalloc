@@ -216,17 +216,17 @@ const MediumChunkArena = struct {
     const Buffers = std.SinglyLinkedList(Buffer);
     const NodeMemPool = std.heap.MemoryPool(Buffers.Node);
 
-    chunks: Buffers = .{},
+    buffers: Buffers = .{},
 
     pub fn deinit(self: *MediumChunkArena) void {
-        var cur_node = self.chunks.first;
+        var cur_node = self.buffers.first;
         while (cur_node) |node| : (cur_node = cur_node.?.next) {
             std.heap.page_allocator.free(node.data.ptr[0..Buffer.SIZE]);
         }
     }
 
     pub fn putChunk(self: *MediumChunkArena, ptr: ErasedPtr, size: usize) void {
-        var cur_node = self.chunks.first;
+        var cur_node = self.buffers.first;
         while (cur_node) |node| {
             if (node.data.ownsChunk(ptr)) {
                 node.data.putChunk(ptr, size);
@@ -244,10 +244,18 @@ const MediumChunkArena = struct {
         return std.math.shl(usize, @as(usize, @intCast(1)), shift);
     }
 
+    fn addNewBuffer(self: *MediumChunkArena, node_mempool: *NodeMemPool) Error!*Buffer {
+        const new_node = try node_mempool.create();
+        new_node.data = try Buffer.init();
+        self.buffers.prepend(new_node);
+
+        return &self.buffers.first.?.data;
+    }
+
     pub fn getChunk(self: *MediumChunkArena, node_mempool: *NodeMemPool, requested_size: usize) Error!ErasedPtr {
         const size = roundSize(requested_size);
 
-        var cur_node = self.chunks.first;
+        var cur_node = self.buffers.first;
         while (cur_node) |node| {
             if (node.data.getChunk(size)) |ptr| {
                 return ptr;
@@ -255,12 +263,9 @@ const MediumChunkArena = struct {
             cur_node = node.next;
         }
 
-        // didn't find any chunks, have to add new chunk
-        cur_node = try node_mempool.create();
-        cur_node.?.data = try Buffer.init();
-        self.chunks.prepend(cur_node.?);
-
-        return cur_node.?.data.getChunk(size).?;
+        // couldn't find any chunks, have to add new buffer
+        var new_buffer = try self.addNewBuffer(node_mempool);
+        return new_buffer.getChunk(size).?;
     }
 };
 
