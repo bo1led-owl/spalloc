@@ -1,6 +1,6 @@
 # spalloc
 
-Toy allocator written in Zig, inspired by Sys.Pro C programming language course task.
+Toy allocator written in Zig, inspired by @nsu-syspro C programming language course task.
 
 ## Features
 - No headers before chunks
