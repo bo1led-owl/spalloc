@@ -17,8 +17,6 @@ const MAX_MEDIUM_CHUNK_SIZE = 32 * KiB;
 const CHUNK_SIZE_STEP = 16;
 const CHUNK_ALIGNMENT = 8;
 
-const ZERO_SIZE_ALLOCATION_ADDRESS: ErasedPtr = @ptrFromInt(0xbebebe00);
-
 const ErasedPtr = [*]align(CHUNK_ALIGNMENT) u8;
 
 const FreeChunk = struct {
@@ -628,7 +626,7 @@ test "zero size allocation" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    try std.testing.expectEqual(ZERO_SIZE_ALLOCATION_ADDRESS, try allocator.malloc(0));
+    try std.testing.expectEqual(null, try allocator.malloc(0));
 }
 
 test "null free" {
@@ -660,15 +658,15 @@ test "medium size chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    var p: [*]u8 = try allocator.malloc(MAX_SMALL_CHUNK_SIZE + 15);
+    var p: [*]u8 = (try allocator.malloc(MAX_SMALL_CHUNK_SIZE + 15)).?;
     p[MAX_SMALL_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MIN_MEDIUM_CHUNK_SIZE * 4);
+    p = (try allocator.malloc(MIN_MEDIUM_CHUNK_SIZE * 4)).?;
     p[MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE);
+    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE)).?;
     p[MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
     try allocator.free(p);
 
@@ -679,11 +677,11 @@ test "large chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    var p: [*]u8 = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE + 15);
+    var p: [*]u8 = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE + 15)).?;
     p[MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2);
+    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2)).?;
     p[MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
     try allocator.free(p);
 
@@ -707,7 +705,7 @@ test "leak" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(false) == .ok);
 
-    const p = try allocator.malloc(16);
+    const p = (try allocator.malloc(16)).?;
     try std.testing.expectEqual(.leak, allocator.detectLeaks());
 
     try allocator.free(p);
