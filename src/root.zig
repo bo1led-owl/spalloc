@@ -441,9 +441,9 @@ pub const SpAllocator = struct {
         entry.set(new_node);
     }
 
-    pub fn malloc(self: *Self, requested_size: usize) Error!ErasedPtr {
+    pub fn malloc(self: *Self, requested_size: usize) Error!?ErasedPtr {
         if (requested_size == 0) {
-            return ZERO_SIZE_ALLOCATION_ADDRESS;
+            return null;
         }
 
         var size: usize = undefined;
@@ -477,8 +477,8 @@ pub const SpAllocator = struct {
         return ptr;
     }
 
-    pub fn calloc(self: *Self, n: usize, elem_size: usize) Error!ErasedPtr {
-        const ptr = try self.malloc(n * elem_size);
+    pub fn calloc(self: *Self, n: usize, elem_size: usize) Error!?ErasedPtr {
+        const ptr = try self.malloc(n * elem_size) orelse return null;
         @memset(ptr[0..(n * elem_size)], 0);
         return ptr;
     }
@@ -486,7 +486,7 @@ pub const SpAllocator = struct {
     pub const FreeError = error{
         InvalidAddress,
     };
-    pub fn realloc(self: *Self, ptr: ?*anyopaque, requested_size: usize) !ErasedPtr {
+    pub fn realloc(self: *Self, ptr: ?*anyopaque, requested_size: usize) !?ErasedPtr {
         if (ptr == null) {
             return self.malloc(requested_size);
         }
@@ -517,7 +517,7 @@ pub const SpAllocator = struct {
             if (result) |res_ptr| {
                 chunk_entry.set(null);
                 node.key = AllocatedChunk{ .payload = res_ptr, .size = new_size };
-                
+
                 var entry = self.allocated_chunks.getEntryFor(node.key);
                 entry.set(node);
 
@@ -525,7 +525,7 @@ pub const SpAllocator = struct {
             }
         }
 
-        const result = try self.malloc(requested_size);
+        const result = (try self.malloc(requested_size)).?;
         @memcpy(result[0..cur_size], ptr_casted[0..cur_size]);
         self.free(ptr) catch @panic("`free` in `realloc` broke unexpectedly");
 
