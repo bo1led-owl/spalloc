@@ -1,9 +1,6 @@
 const Self = @This();
 
 const std = @import("std");
-const libc = @cImport({
-    @cInclude("string.h");
-});
 
 const common = @import("common.zig");
 const ErasedPtr = common.ErasedPtr;
@@ -145,7 +142,7 @@ const Buffer = struct {
         }
 
         if (result_ptr) |ptr| {
-            _ = libc.memmove(ptr, chunk, cur_size);
+            common.memmove(u8, ptr[0..cur_size], chunk[0..cur_size]);
             self.header.markChunkAllocated(@intCast(result_index));
             return ptr;
         }

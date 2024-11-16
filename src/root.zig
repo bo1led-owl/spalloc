@@ -9,7 +9,7 @@ const ErasedPtr = common.ErasedPtr;
 const consts = common.consts;
 
 const SmallChunkPool = @import("SmallChunkPool.zig");
-const MediumChunkArena = @import("MediumChunkArena.zig"); 
+const MediumChunkArena = @import("MediumChunkArena.zig");
 
 const AllocatedChunk = struct {
     payload: ErasedPtr,
@@ -147,17 +147,16 @@ pub const SpAllocator = struct {
                 ptr = try self.medium_chunk_arena.getChunk(&self.medium_chunk_arena_node_mempool, size);
             },
             else => {
-                if (std.math.maxInt(usize) - requested_size < std.mem.page_size) {
-                    size = std.math.maxInt(usize);
-                } else {
-                    size = std.mem.alignForward(usize, requested_size, std.mem.page_size);
-                }
+                const aligned_size_overflows_usize = std.math.maxInt(usize) - requested_size < std.mem.page_size;
+                size = if (aligned_size_overflows_usize)
+                    std.math.maxInt(usize)
+                else
+                    std.mem.alignForward(usize, requested_size, std.mem.page_size);
                 ptr = (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, size)).ptr;
             },
         }
 
         try self.markChunkAllocated(ptr, size);
-
         return ptr;
     }
 
@@ -182,6 +181,7 @@ pub const SpAllocator = struct {
         const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
         var chunk_entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr_casted, .size = undefined });
         if (chunk_entry.node == null) {
+            // `ptr` is not valid allocated block address
             return FreeError.InvalidAddress;
         }
 
@@ -189,14 +189,15 @@ pub const SpAllocator = struct {
         const cur_size = node.key.size;
 
         if (cur_size >= requested_size) {
+            // no need to resize
             return ptr_casted;
         }
 
+        // specific things when resizing medium arena chunks
         if (consts.MAX_SMALL_CHUNK_SIZE < cur_size and cur_size <= consts.MAX_MEDIUM_CHUNK_SIZE and
             consts.MAX_SMALL_CHUNK_SIZE < requested_size and requested_size <= consts.MAX_MEDIUM_CHUNK_SIZE)
         {
             const new_size = MediumChunkArena.roundSize(requested_size);
-
             const result = self.medium_chunk_arena.tryResizeChunk(ptr_casted, cur_size, new_size);
             if (result) |res_ptr| {
                 chunk_entry.set(null);
@@ -204,11 +205,11 @@ pub const SpAllocator = struct {
 
                 var entry = self.allocated_chunks.getEntryFor(node.key);
                 entry.set(node);
-
                 return res_ptr;
             }
         }
 
+        // nothing to do, have to malloc, memcpy and free
         const result = (try self.malloc(requested_size)).?;
         @memcpy(result[0..cur_size], ptr_casted[0..cur_size]);
         self.free(ptr) catch @panic("`free` in `realloc` broke unexpectedly");

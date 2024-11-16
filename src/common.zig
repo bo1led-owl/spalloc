@@ -19,3 +19,11 @@ pub const Error = std.mem.Allocator.Error;
 pub fn getMemoryPages(n: usize) Error!ErasedPtr {
     return (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, n * std.mem.page_size)).ptr;
 }
+
+pub fn memmove(comptime T: type, dest: []T, src: []const T) void {
+    if (@intFromPtr(dest.ptr) <= @intFromPtr(src.ptr)) {
+        std.mem.copyForwards(T, dest, src);
+    } else {
+        std.mem.copyBackwards(T, dest, src);
+    }
+}
