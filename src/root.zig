@@ -39,24 +39,29 @@ const SmallChunkPool = struct {
         const SIZE = 4 * std.mem.page_size;
 
         ptr: ErasedPtr,
+        after_last_chunk: ErasedPtr,
 
         pub fn init() Error!Buffer {
+            const ptr = try getMemoryPages(SIZE / std.mem.page_size);
             return Buffer{
-                .ptr = try getMemoryPages(SIZE / std.mem.page_size),
+                .ptr = ptr,
+                .after_last_chunk = ptr,
             };
+        }
+
+        pub fn tryAppendChunk(self: *Buffer, chunk_size: usize) ?ErasedPtr {
+            if (@intFromPtr(self.ptr + SIZE) - @intFromPtr(self.after_last_chunk) < chunk_size) {
+                return null;
+            }
+
+            defer self.after_last_chunk = @alignCast(self.after_last_chunk + chunk_size);
+            return self.after_last_chunk;
         }
 
         pub fn getChunksCount(chunk_size: usize) usize {
             std.debug.assert(chunk_size % CHUNK_SIZE_STEP == 0);
 
             return std.mem.page_size / chunk_size;
-        }
-
-        pub fn getNthChunk(self: Buffer, chunk_size: usize, n: usize) *FreeChunk {
-            std.debug.assert(chunk_size % CHUNK_SIZE_STEP == 0);
-            std.debug.assert(chunk_size * n < std.mem.page_size);
-
-            return @ptrCast(@alignCast(self.ptr + (chunk_size * n)));
         }
     };
 
@@ -83,17 +88,10 @@ const SmallChunkPool = struct {
 
     fn addNewBuffer(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!void {
         const new_node: *Buffers.Node = try node_mempool.create();
-        const new_chunk = try Buffer.init();
-        new_node.data = new_chunk;
+        const new_buffer = try Buffer.init();
+        new_node.data = new_buffer;
         self.buffers.prepend(new_node);
 
-        for (0..Buffer.getChunksCount(self.chunk_size) - 1) |i| {
-            var cur_chunk = new_chunk.getNthChunk(self.chunk_size, i);
-            cur_chunk.next = new_chunk.getNthChunk(self.chunk_size, i + 1);
-        }
-        new_chunk.getNthChunk(self.chunk_size, Buffer.getChunksCount(self.chunk_size) - 1).next = null;
-
-        self.first_free_chunk = new_chunk.getNthChunk(self.chunk_size, 0);
     }
 
     pub fn putChunk(self: *SmallChunkPool, ptr: ErasedPtr) void {
@@ -103,13 +101,20 @@ const SmallChunkPool = struct {
     }
 
     pub fn getChunk(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!ErasedPtr {
-        if (self.first_free_chunk == null) {
-            try self.addNewBuffer(node_mempool);
+        if (self.first_free_chunk) |result| {
+            std.debug.print("0x{x}\n", .{@intFromPtr(self.first_free_chunk)});
+            self.first_free_chunk = result.next;
+            return @ptrCast(result);
         }
 
-        const result = self.first_free_chunk.?;
-        self.first_free_chunk = result.next;
-        return @ptrCast(result);
+        if (self.buffers.first) |first_node| {
+            if (first_node.data.tryAppendChunk(self.chunk_size)) |result| {
+                return result;
+            }
+        }
+
+        try self.addNewBuffer(node_mempool);
+        return self.buffers.first.?.data.tryAppendChunk(self.chunk_size).?;
     }
 };
 
