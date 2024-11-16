@@ -91,7 +91,6 @@ const SmallChunkPool = struct {
         const new_buffer = try Buffer.init();
         new_node.data = new_buffer;
         self.buffers.prepend(new_node);
-
     }
 
     pub fn putChunk(self: *SmallChunkPool, ptr: ErasedPtr) void {
@@ -103,17 +102,21 @@ const SmallChunkPool = struct {
     pub fn getChunk(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!ErasedPtr {
         if (self.first_free_chunk) |result| {
             self.first_free_chunk = result.next;
+            result.next = null;
             return @ptrCast(result);
         }
 
         if (self.buffers.first) |first_node| {
             if (first_node.data.tryAppendChunk(self.chunk_size)) |result| {
+                @as(*FreeChunk, @ptrCast(@alignCast(result))).next = null;
                 return result;
             }
         }
 
         try self.addNewBuffer(node_mempool);
-        return self.buffers.first.?.data.tryAppendChunk(self.chunk_size).?;
+        const result = self.buffers.first.?.data.tryAppendChunk(self.chunk_size).?;
+        @as(*FreeChunk, @ptrCast(@alignCast(result))).next = null;
+        return result;
     }
 };
 
@@ -654,6 +657,18 @@ test "basic" {
     for (0..len) |i| {
         try allocator.free(pointers[i]);
     }
+
+    try std.testing.expectEqual(.ok, allocator.detectLeaks());
+}
+
+test "allocate, deallocate, allocate the same block" {
+    allocator = SpAllocator.init();
+    defer std.debug.assert(allocator.deinit(false) == .ok);
+
+    var p = try allocator.malloc(@sizeOf(u32));
+    try allocator.free(p);
+    p = try allocator.malloc(@sizeOf(u32));
+    try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
