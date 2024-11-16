@@ -102,7 +102,6 @@ const SmallChunkPool = struct {
 
     pub fn getChunk(self: *SmallChunkPool, node_mempool: *NodeMemPool) Error!ErasedPtr {
         if (self.first_free_chunk) |result| {
-            std.debug.print("0x{x}\n", .{@intFromPtr(self.first_free_chunk)});
             self.first_free_chunk = result.next;
             return @ptrCast(result);
         }
