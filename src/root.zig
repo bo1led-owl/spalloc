@@ -63,11 +63,10 @@ pub const SpAllocator = struct {
         };
     }
 
-    const LeakCheckResult = enum {
+    pub const LeakCheckResult = enum {
         ok,
         leak,
     };
-
     pub fn detectLeaks(self: Self) LeakCheckResult {
         if (self.allocated_chunks.root != null) {
             return .leak;
@@ -75,9 +74,13 @@ pub const SpAllocator = struct {
         return .ok;
     }
 
-    pub fn deinit(self: *Self, report_leaks: bool) LeakCheckResult {
+    pub const DeinitOptions = enum {
+        silent,
+        report_leaks,
+    };
+    pub fn deinit(self: *Self, options: DeinitOptions) LeakCheckResult {
         const result = self.detectLeaks();
-        if (result == .leak and report_leaks) {
+        if (result == .leak and options == DeinitOptions.report_leaks) {
             var iter = self.allocated_chunks.inorderIterator();
 
             while (iter.next()) |node| {
@@ -252,7 +255,7 @@ var allocator: SpAllocator = undefined;
 var is_allocator_initialized: bool = false;
 
 export fn deinitAllocator() callconv(.C) void {
-    _ = allocator.deinit(true);
+    _ = allocator.deinit(SpAllocator.DeinitOptions.report_leaks);
 }
 
 fn ensureAllocatorIsInitialized() void {
@@ -311,21 +314,21 @@ test "round size" {
 
 test "zero size allocation" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     try std.testing.expectEqual(null, try allocator.malloc(0));
 }
 
 test "null free" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     try std.testing.expect(allocator.free(null) != SpAllocator.FreeError.InvalidAddress);
 }
 
 test "basic" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     const len = 16;
     var pointers = [_]*u32{undefined} ** len;
@@ -343,7 +346,7 @@ test "basic" {
 
 test "allocate, deallocate, allocate the same block" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var p = try allocator.malloc(@sizeOf(u32));
     try allocator.free(p);
@@ -355,7 +358,7 @@ test "allocate, deallocate, allocate the same block" {
 
 test "medium size chunks" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var p: [*]u8 = (try allocator.malloc(consts.MAX_SMALL_CHUNK_SIZE + 15)).?;
     p[consts.MAX_SMALL_CHUNK_SIZE + 14] = 42;
@@ -374,7 +377,7 @@ test "medium size chunks" {
 
 test "large chunks" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var p: [*]u8 = (try allocator.malloc(consts.MAX_MEDIUM_CHUNK_SIZE + 15)).?;
     p[consts.MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
@@ -389,7 +392,7 @@ test "large chunks" {
 
 test "out of memory" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var size: usize = std.math.maxInt(usize);
     size -= size % consts.CHUNK_SIZE_STEP;
@@ -402,7 +405,7 @@ test "out of memory" {
 
 test "leak" {
     allocator = SpAllocator.init();
-    defer std.debug.assert(allocator.deinit(false) == .ok);
+    defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     const p = (try allocator.malloc(16)).?;
     try std.testing.expectEqual(.leak, allocator.detectLeaks());
