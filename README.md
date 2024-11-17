@@ -5,7 +5,7 @@ Toy allocator written in Zig, inspired by [Sys.Pro](https://sys.pro/) C programm
 ## Features
 - No headers before chunks
 - Using additional memory only when chunks get allocated
-- Support for special treatment of different types of chunks for better performance.
+- Support for special treatment of different types of chunks for better performance
 
 ## Usage
 `spalloc.h` provides `spmalloc`, `spcalloc`, `sprealloc` and `spfree` functions. These functions have the same API as the standard C `malloc`, `calloc`, `realloc` and `free`.
