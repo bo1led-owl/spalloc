@@ -4,7 +4,6 @@ pub const KiB = 1024;
 pub const MiB = 1024 * KiB;
 
 pub const consts = struct {
-    pub const CHUNK_SIZE_STEP = 16;
     pub const CHUNK_ALIGNMENT = 8;
 };
 

@@ -7,6 +7,7 @@ const Error = common.Error;
 
 const consts = common.consts;
 
+pub const CHUNK_SIZE_STEP = 16;
 pub const MIN_CHUNK_SIZE = 16;
 pub const MAX_CHUNK_SIZE = 256;
 

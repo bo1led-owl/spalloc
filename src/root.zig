@@ -11,6 +11,7 @@ const consts = common.consts;
 const SmallChunkPool = @import("SmallChunkPool.zig");
 const MediumChunkArena = @import("MediumChunkArena.zig");
 
+const SMALL_CHUNK_SIZE_STEP = SmallChunkPool.CHUNK_SIZE_STEP;
 const MIN_SMALL_CHUNK_SIZE = SmallChunkPool.MIN_CHUNK_SIZE;
 const MAX_SMALL_CHUNK_SIZE = SmallChunkPool.MAX_CHUNK_SIZE;
 
@@ -32,7 +33,7 @@ pub const SpAllocator = struct {
     const AllocatedChunks = std.Treap(AllocatedChunk, AllocatedChunk.cmp);
     const AllocatedChunksNodeMemPool = std.heap.MemoryPool(AllocatedChunks.Node);
 
-    const SMALL_CHUNK_POOLS_COUNT = MAX_SMALL_CHUNK_SIZE / consts.CHUNK_SIZE_STEP;
+    const SMALL_CHUNK_POOLS_COUNT = MAX_SMALL_CHUNK_SIZE / SMALL_CHUNK_SIZE_STEP;
 
     small_chunk_pools_node_mempool: SmallChunkPool.NodeMemPool,
     small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool,
@@ -47,10 +48,10 @@ pub const SpAllocator = struct {
         var small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool =
             [_]SmallChunkPool{undefined} ** SMALL_CHUNK_POOLS_COUNT;
         for (0..SMALL_CHUNK_POOLS_COUNT) |i| {
-            const cur_chunk_size = (i + 1) * consts.CHUNK_SIZE_STEP;
+            const cur_chunk_size = (i + 1) * SMALL_CHUNK_SIZE_STEP;
             std.debug.assert(MIN_SMALL_CHUNK_SIZE <= cur_chunk_size);
             std.debug.assert(cur_chunk_size <= MAX_SMALL_CHUNK_SIZE);
-            std.debug.assert(cur_chunk_size % consts.CHUNK_SIZE_STEP == 0);
+            std.debug.assert(cur_chunk_size % SMALL_CHUNK_SIZE_STEP == 0);
 
             small_chunk_pools[i] = SmallChunkPool.init(cur_chunk_size);
         }
@@ -106,9 +107,9 @@ pub const SpAllocator = struct {
     fn getSmallChunkPoolIndex(size: usize) usize {
         std.debug.assert(MIN_SMALL_CHUNK_SIZE <= size);
         std.debug.assert(size <= MAX_SMALL_CHUNK_SIZE);
-        std.debug.assert(size % consts.CHUNK_SIZE_STEP == 0);
+        std.debug.assert(size % SMALL_CHUNK_SIZE_STEP == 0);
 
-        const result = size / consts.CHUNK_SIZE_STEP - 1;
+        const result = size / SMALL_CHUNK_SIZE_STEP - 1;
         std.debug.assert(result < SMALL_CHUNK_POOLS_COUNT);
         return result;
     }
@@ -142,7 +143,7 @@ pub const SpAllocator = struct {
         var size: usize = undefined;
         var ptr: ErasedPtr = undefined;
 
-        size = std.mem.alignForward(usize, requested_size, consts.CHUNK_SIZE_STEP);
+        size = std.mem.alignForward(usize, requested_size, SMALL_CHUNK_SIZE_STEP);
         switch (size) {
             0...MAX_SMALL_CHUNK_SIZE => {
                 const pool_index = getSmallChunkPoolIndex(size);
@@ -403,7 +404,7 @@ test "out of memory" {
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var size: usize = std.math.maxInt(usize);
-    size -= size % consts.CHUNK_SIZE_STEP;
+    size -= size % SMALL_CHUNK_SIZE_STEP;
 
     const p = allocator.malloc(size);
     try std.testing.expectEqual(Error.OutOfMemory, p);
