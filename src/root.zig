@@ -18,17 +18,17 @@ const MAX_SMALL_CHUNK_SIZE = SmallChunkPool.MAX_CHUNK_SIZE;
 const MIN_MEDIUM_CHUNK_SIZE = MediumChunkArena.MIN_CHUNK_SIZE;
 const MAX_MEDIUM_CHUNK_SIZE = MediumChunkArena.MAX_CHUNK_SIZE;
 
-const AllocatedChunk = struct {
-    payload: ErasedPtr,
-    size: usize,
-
-    fn cmp(a: AllocatedChunk, b: AllocatedChunk) std.math.Order {
-        return std.math.order(@intFromPtr(a.payload), @intFromPtr(b.payload));
-    }
-};
-
 pub const SpAllocator = struct {
     const Self = @This();
+
+    const AllocatedChunk = struct {
+        payload: ErasedPtr,
+        size: usize,
+
+        fn cmp(a: AllocatedChunk, b: AllocatedChunk) std.math.Order {
+            return std.math.order(@intFromPtr(a.payload), @intFromPtr(b.payload));
+        }
+    };
 
     const AllocatedChunks = std.Treap(AllocatedChunk, AllocatedChunk.cmp);
     const AllocatedChunksNodeMemPool = std.heap.MemoryPool(AllocatedChunks.Node);
@@ -56,9 +56,9 @@ pub const SpAllocator = struct {
             small_chunk_pools[i] = SmallChunkPool.init(cur_chunk_size);
         }
 
-        const small_chunk_pools_node_mempool = SmallChunkPool.NodeMemPool.init(std.heap.page_allocator);
-        const medium_chunk_arena_node_mempool = MediumChunkArena.NodeMemPool.init(std.heap.page_allocator);
-        const allocated_chunks_node_mempool = AllocatedChunksNodeMemPool.init(std.heap.page_allocator);
+        const small_chunk_pools_node_mempool = SmallChunkPool.NodeMemPool.init(common.OsMemoryAllocator);
+        const medium_chunk_arena_node_mempool = MediumChunkArena.NodeMemPool.init(common.OsMemoryAllocator);
+        const allocated_chunks_node_mempool = AllocatedChunksNodeMemPool.init(common.OsMemoryAllocator);
 
         return Self{
             .small_chunk_pools_node_mempool = small_chunk_pools_node_mempool,
@@ -162,7 +162,7 @@ pub const SpAllocator = struct {
                     std.math.maxInt(usize)
                 else
                     std.mem.alignForward(usize, requested_size, std.mem.page_size);
-                ptr = (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, size)).ptr;
+                ptr = try common.requestMemoryFromOS(size);
             },
         }
 
@@ -235,6 +235,7 @@ pub const SpAllocator = struct {
         }
 
         if (!std.mem.isAligned(@intFromPtr(ptr), consts.CHUNK_ALIGNMENT)) {
+            // invalid (unaligned) address passed
             return FreeError.InvalidAddress;
         }
 
@@ -243,19 +244,24 @@ pub const SpAllocator = struct {
             .size = undefined,
         });
         if (entry.node == null) {
+            // address that does not match any of the allocated chunks passed
             return FreeError.InvalidAddress;
         }
 
         const chunk = entry.node.?.key;
         entry.set(null);
 
-        if (chunk.size <= MAX_SMALL_CHUNK_SIZE) {
-            const pool_index = getSmallChunkPoolIndex(chunk.size);
-            self.small_chunk_pools[pool_index].putChunk(chunk.payload);
-        } else if (chunk.size <= MAX_MEDIUM_CHUNK_SIZE) {
-            self.medium_chunk_arena.putChunk(chunk.payload, chunk.size);
-        } else {
-            std.heap.page_allocator.free(chunk.payload[0..chunk.size]);
+        switch (chunk.size) {
+            0...MAX_SMALL_CHUNK_SIZE => {
+                const pool_index = getSmallChunkPoolIndex(chunk.size);
+                self.small_chunk_pools[pool_index].putChunk(chunk.payload);
+            },
+            (MAX_SMALL_CHUNK_SIZE + 1)...MAX_MEDIUM_CHUNK_SIZE => {
+                self.medium_chunk_arena.putChunk(chunk.payload, chunk.size);
+            },
+            else => {
+                common.returnMemoryToOS(chunk.payload, chunk.size);
+            },
         }
     }
 };

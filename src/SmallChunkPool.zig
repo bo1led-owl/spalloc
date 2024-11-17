@@ -29,7 +29,7 @@ const Buffer = struct {
     after_last_chunk: ErasedPtr,
 
     pub fn init() Error!Buffer {
-        const ptr = try common.getMemoryPages(SIZE / std.mem.page_size);
+        const ptr = try common.requestMemoryFromOS(SIZE);
         return Buffer{
             .ptr = ptr,
             .after_last_chunk = ptr,
@@ -69,7 +69,7 @@ pub fn init(chunk_size: usize) Self {
 pub fn deinit(self: *Self) void {
     var cur_node = self.buffers.first;
     while (cur_node) |node| : (cur_node = cur_node.?.next) {
-        std.heap.page_allocator.free(node.data.ptr[0..Buffer.SIZE]);
+        common.returnMemoryToOS(node.data.ptr, Buffer.SIZE);
     }
 }
 

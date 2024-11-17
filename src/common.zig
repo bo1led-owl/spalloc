@@ -10,8 +10,15 @@ pub const consts = struct {
 pub const ErasedPtr = [*]align(consts.CHUNK_ALIGNMENT) u8;
 pub const Error = std.mem.Allocator.Error;
 
-pub fn getMemoryPages(n: usize) Error!ErasedPtr {
-    return (try std.heap.page_allocator.alignedAlloc(u8, std.mem.page_size, n * std.mem.page_size)).ptr;
+pub const OsMemoryAllocator = std.heap.page_allocator;
+pub fn requestMemoryFromOS(size: usize) Error!ErasedPtr {
+    return (try OsMemoryAllocator.alignedAlloc(u8, std.mem.page_size, size)).ptr;
+}
+
+pub fn returnMemoryToOS(ptr: ErasedPtr, size: usize) void {
+    std.debug.assert(std.mem.isAligned(@intFromPtr(ptr), std.mem.page_size));
+
+    OsMemoryAllocator.free(ptr[0..size]);
 }
 
 pub fn memmove(comptime T: type, dest: []T, src: []const T) void {

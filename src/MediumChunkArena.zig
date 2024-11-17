@@ -18,7 +18,7 @@ const Buffer = struct {
     header: Header,
     ptr: ErasedPtr,
 
-    pub const Header = struct {
+    const Header = struct {
         const SMALLEST_CHUNKS_COUNT = MAX_CHUNK_SIZE / MIN_CHUNK_SIZE;
         const BITS = 2 * SMALLEST_CHUNKS_COUNT - 1;
 
@@ -71,7 +71,7 @@ const Buffer = struct {
     pub fn init() Error!Buffer {
         return Buffer{
             .header = .{ .repr = Header.ReprType.initEmpty() },
-            .ptr = try common.getMemoryPages(SIZE / std.mem.page_size),
+            .ptr = try common.requestMemoryFromOS(SIZE),
         };
     }
 
@@ -164,7 +164,7 @@ buffers: Buffers = .{},
 pub fn deinit(self: *Self) void {
     var cur_node = self.buffers.first;
     while (cur_node) |node| : (cur_node = cur_node.?.next) {
-        std.heap.page_allocator.free(node.data.ptr[0..Buffer.SIZE]);
+        common.returnMemoryToOS(node.data.ptr, Buffer.SIZE);
     }
 }
 
