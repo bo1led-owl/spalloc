@@ -7,15 +7,19 @@ const ErasedPtr = common.ErasedPtr;
 const Error = common.Error;
 
 const consts = common.consts;
+const MAX_SMALL_CHUNK_SIZE = @import("SmallChunkPool.zig").MAX_CHUNK_SIZE;
+
+pub const MIN_CHUNK_SIZE = MAX_SMALL_CHUNK_SIZE * 2;
+pub const MAX_CHUNK_SIZE = 32 * common.KiB;
 
 const Buffer = struct {
-    const SIZE = consts.MAX_MEDIUM_CHUNK_SIZE;
+    const SIZE = MAX_CHUNK_SIZE;
 
     header: Header,
     ptr: ErasedPtr,
 
     pub const Header = struct {
-        const SMALLEST_CHUNKS_COUNT = consts.MAX_MEDIUM_CHUNK_SIZE / consts.MIN_MEDIUM_CHUNK_SIZE;
+        const SMALLEST_CHUNKS_COUNT = MAX_CHUNK_SIZE / MIN_CHUNK_SIZE;
         const BITS = 2 * SMALLEST_CHUNKS_COUNT - 1;
 
         const ReprType = std.StaticBitSet(BITS);
@@ -72,8 +76,8 @@ const Buffer = struct {
     }
 
     pub fn getChunk(self: *Buffer, size: usize) ?ErasedPtr {
-        std.debug.assert(size >= consts.MIN_MEDIUM_CHUNK_SIZE);
-        std.debug.assert(size <= consts.MAX_MEDIUM_CHUNK_SIZE);
+        std.debug.assert(size >= MIN_CHUNK_SIZE);
+        std.debug.assert(size <= MAX_CHUNK_SIZE);
         std.debug.assert(@popCount(size) == 1);
 
         const chunks_to_check = Buffer.SIZE / size;
@@ -94,8 +98,8 @@ const Buffer = struct {
 
     pub fn putChunk(self: *Buffer, ptr: ErasedPtr, size: usize) void {
         std.debug.assert(self.ownsChunk(ptr));
-        std.debug.assert(size >= consts.MIN_MEDIUM_CHUNK_SIZE);
-        std.debug.assert(size <= consts.MAX_MEDIUM_CHUNK_SIZE);
+        std.debug.assert(size >= MIN_CHUNK_SIZE);
+        std.debug.assert(size <= MAX_CHUNK_SIZE);
         std.debug.assert(@popCount(size) == 1);
 
         const index: u6 = @intCast((@intFromPtr(ptr) - @intFromPtr(self.ptr)) / size);

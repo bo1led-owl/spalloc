@@ -11,6 +11,12 @@ const consts = common.consts;
 const SmallChunkPool = @import("SmallChunkPool.zig");
 const MediumChunkArena = @import("MediumChunkArena.zig");
 
+const MIN_SMALL_CHUNK_SIZE = SmallChunkPool.MIN_CHUNK_SIZE;
+const MAX_SMALL_CHUNK_SIZE = SmallChunkPool.MAX_CHUNK_SIZE;
+
+const MIN_MEDIUM_CHUNK_SIZE = MediumChunkArena.MIN_CHUNK_SIZE;
+const MAX_MEDIUM_CHUNK_SIZE = MediumChunkArena.MAX_CHUNK_SIZE;
+
 const AllocatedChunk = struct {
     payload: ErasedPtr,
     size: usize,
@@ -26,7 +32,7 @@ pub const SpAllocator = struct {
     const AllocatedChunks = std.Treap(AllocatedChunk, AllocatedChunk.cmp);
     const AllocatedChunksNodeMemPool = std.heap.MemoryPool(AllocatedChunks.Node);
 
-    const SMALL_CHUNK_POOLS_COUNT = consts.MAX_SMALL_CHUNK_SIZE / consts.CHUNK_SIZE_STEP;
+    const SMALL_CHUNK_POOLS_COUNT = MAX_SMALL_CHUNK_SIZE / consts.CHUNK_SIZE_STEP;
 
     small_chunk_pools_node_mempool: SmallChunkPool.NodeMemPool,
     small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool,
@@ -42,8 +48,8 @@ pub const SpAllocator = struct {
             [_]SmallChunkPool{undefined} ** SMALL_CHUNK_POOLS_COUNT;
         for (0..SMALL_CHUNK_POOLS_COUNT) |i| {
             const cur_chunk_size = (i + 1) * consts.CHUNK_SIZE_STEP;
-            std.debug.assert(consts.MIN_CHUNK_SIZE <= cur_chunk_size);
-            std.debug.assert(cur_chunk_size <= consts.MAX_SMALL_CHUNK_SIZE);
+            std.debug.assert(MIN_SMALL_CHUNK_SIZE <= cur_chunk_size);
+            std.debug.assert(cur_chunk_size <= MAX_SMALL_CHUNK_SIZE);
             std.debug.assert(cur_chunk_size % consts.CHUNK_SIZE_STEP == 0);
 
             small_chunk_pools[i] = SmallChunkPool.init(cur_chunk_size);
@@ -98,8 +104,8 @@ pub const SpAllocator = struct {
     }
 
     fn getSmallChunkPoolIndex(size: usize) usize {
-        std.debug.assert(consts.MIN_CHUNK_SIZE <= size);
-        std.debug.assert(size <= consts.MAX_SMALL_CHUNK_SIZE);
+        std.debug.assert(MIN_SMALL_CHUNK_SIZE <= size);
+        std.debug.assert(size <= MAX_SMALL_CHUNK_SIZE);
         std.debug.assert(size % consts.CHUNK_SIZE_STEP == 0);
 
         const result = size / consts.CHUNK_SIZE_STEP - 1;
@@ -138,14 +144,14 @@ pub const SpAllocator = struct {
 
         size = std.mem.alignForward(usize, requested_size, consts.CHUNK_SIZE_STEP);
         switch (size) {
-            0...consts.MAX_SMALL_CHUNK_SIZE => {
+            0...MAX_SMALL_CHUNK_SIZE => {
                 const pool_index = getSmallChunkPoolIndex(size);
 
                 std.debug.assert(self.small_chunk_pools[pool_index].chunk_size == size);
 
                 ptr = try self.small_chunk_pools[pool_index].getChunk(&self.small_chunk_pools_node_mempool);
             },
-            (consts.MAX_SMALL_CHUNK_SIZE + 1)...consts.MAX_MEDIUM_CHUNK_SIZE => {
+            (MAX_SMALL_CHUNK_SIZE + 1)...MAX_MEDIUM_CHUNK_SIZE => {
                 size = MediumChunkArena.roundSize(requested_size);
                 ptr = try self.medium_chunk_arena.getChunk(&self.medium_chunk_arena_node_mempool, size);
             },
@@ -197,9 +203,11 @@ pub const SpAllocator = struct {
         }
 
         // specific things when resizing medium arena chunks
-        if (consts.MAX_SMALL_CHUNK_SIZE < cur_size and cur_size <= consts.MAX_MEDIUM_CHUNK_SIZE and
-            consts.MAX_SMALL_CHUNK_SIZE < requested_size and requested_size <= consts.MAX_MEDIUM_CHUNK_SIZE)
-        {
+        const cur_is_medium = MAX_SMALL_CHUNK_SIZE < cur_size and
+            cur_size <= MAX_MEDIUM_CHUNK_SIZE;
+        const requested_is_medium = MAX_SMALL_CHUNK_SIZE < requested_size and
+            requested_size <= MAX_MEDIUM_CHUNK_SIZE;
+        if (cur_is_medium and requested_is_medium) {
             const new_size = MediumChunkArena.roundSize(requested_size);
             const result = self.medium_chunk_arena.tryResizeChunk(ptr_casted, cur_size, new_size);
             if (result) |res_ptr| {
@@ -240,10 +248,10 @@ pub const SpAllocator = struct {
         const chunk = entry.node.?.key;
         entry.set(null);
 
-        if (chunk.size <= consts.MAX_SMALL_CHUNK_SIZE) {
+        if (chunk.size <= MAX_SMALL_CHUNK_SIZE) {
             const pool_index = getSmallChunkPoolIndex(chunk.size);
             self.small_chunk_pools[pool_index].putChunk(chunk.payload);
-        } else if (chunk.size <= consts.MAX_MEDIUM_CHUNK_SIZE) {
+        } else if (chunk.size <= MAX_MEDIUM_CHUNK_SIZE) {
             self.medium_chunk_arena.putChunk(chunk.payload, chunk.size);
         } else {
             std.heap.page_allocator.free(chunk.payload[0..chunk.size]);
@@ -360,16 +368,16 @@ test "medium size chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
-    var p: [*]u8 = (try allocator.malloc(consts.MAX_SMALL_CHUNK_SIZE + 15)).?;
-    p[consts.MAX_SMALL_CHUNK_SIZE + 14] = 42;
+    var p: [*]u8 = (try allocator.malloc(MAX_SMALL_CHUNK_SIZE + 15)).?;
+    p[MAX_SMALL_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(consts.MIN_MEDIUM_CHUNK_SIZE * 4)).?;
-    p[consts.MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
+    p = (try allocator.malloc(MIN_MEDIUM_CHUNK_SIZE * 4)).?;
+    p[MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(consts.MAX_MEDIUM_CHUNK_SIZE)).?;
-    p[consts.MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
+    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE)).?;
+    p[MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
@@ -379,12 +387,12 @@ test "large chunks" {
     allocator = SpAllocator.init();
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
-    var p: [*]u8 = (try allocator.malloc(consts.MAX_MEDIUM_CHUNK_SIZE + 15)).?;
-    p[consts.MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
+    var p: [*]u8 = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE + 15)).?;
+    p[MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(consts.MAX_MEDIUM_CHUNK_SIZE * 2)).?;
-    p[consts.MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
+    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2)).?;
+    p[MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());

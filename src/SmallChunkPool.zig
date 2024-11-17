@@ -7,12 +7,15 @@ const Error = common.Error;
 
 const consts = common.consts;
 
+pub const MIN_CHUNK_SIZE = 16;
+pub const MAX_CHUNK_SIZE = 256;
+
 const FreeChunk = struct {
     next: ?*FreeChunk,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(FreeChunk) <= consts.MIN_CHUNK_SIZE);
+    std.debug.assert(@sizeOf(FreeChunk) <= MIN_CHUNK_SIZE);
     std.debug.assert(@alignOf(FreeChunk) == consts.CHUNK_ALIGNMENT);
 }
 
