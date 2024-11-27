@@ -3,68 +3,49 @@ const libc = @cImport({
     @cInclude("stdlib.h");
 });
 
+const config = @import("config.zig");
 const common = @import("common.zig");
 const Error = common.Error;
 const ErasedPtr = common.ErasedPtr;
-const consts = common.consts;
 
-const SmallChunkPool = @import("SmallChunkPool.zig");
-const MediumChunkArena = @import("MediumChunkArena.zig");
-
-const SMALL_CHUNK_SIZE_STEP = SmallChunkPool.CHUNK_SIZE_STEP;
-const MIN_SMALL_CHUNK_SIZE = SmallChunkPool.MIN_CHUNK_SIZE;
-const MAX_SMALL_CHUNK_SIZE = SmallChunkPool.MAX_CHUNK_SIZE;
-
-const MIN_MEDIUM_CHUNK_SIZE = MediumChunkArena.MIN_CHUNK_SIZE;
-const MAX_MEDIUM_CHUNK_SIZE = MediumChunkArena.MAX_CHUNK_SIZE;
+const pools_arena = @import("pools_arena.zig");
+const buddy_system_arena = @import("buddy_system_arena.zig");
 
 pub const SpAllocator = struct {
     const Self = @This();
 
-    const AllocatedChunk = struct {
-        payload: ErasedPtr,
-        size: usize,
+    fn chunkCmp(a: common.Chunk, b: common.Chunk) std.math.Order {
+        return std.math.order(@intFromPtr(a.ptr), @intFromPtr(b.ptr));
+    }
 
-        fn cmp(a: AllocatedChunk, b: AllocatedChunk) std.math.Order {
-            return std.math.order(@intFromPtr(a.payload), @intFromPtr(b.payload));
-        }
-    };
-
-    const AllocatedChunks = std.Treap(AllocatedChunk, AllocatedChunk.cmp);
+    const AllocatedChunks = std.Treap(common.Chunk, chunkCmp);
     const AllocatedChunksNodeMemPool = std.heap.MemoryPool(AllocatedChunks.Node);
 
-    const SMALL_CHUNK_POOLS_COUNT = MAX_SMALL_CHUNK_SIZE / SMALL_CHUNK_SIZE_STEP;
+    const SmallChunksArena = pools_arena.PoolsArena(.{
+        .min_chunk_size = config.MIN_SMALL_CHUNK_SIZE,
+        .max_chunk_size = config.MAX_SMALL_CHUNK_SIZE,
+        .chunk_size_step = config.SMALL_CHUNK_SIZE_STEP,
+    });
+    const MediumChunksArena = buddy_system_arena.BuddySystemArena(.{
+        .min_chunk_size = config.MIN_MEDIUM_CHUNK_SIZE,
+        .max_chunk_size = config.MAX_MEDIUM_CHUNK_SIZE,
+    });
 
-    small_chunk_pools_node_mempool: SmallChunkPool.NodeMemPool,
-    small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool,
+    backing_allocator: std.mem.Allocator,
 
-    medium_chunk_arena_node_mempool: MediumChunkArena.NodeMemPool,
-    medium_chunk_arena: MediumChunkArena,
+    small_chunks_arena: SmallChunksArena,
+    medium_chunks_arena: MediumChunksArena,
 
     allocated_chunks_node_mempool: AllocatedChunksNodeMemPool,
     allocated_chunks: AllocatedChunks,
 
-    pub fn init() Self {
-        var small_chunk_pools: [SMALL_CHUNK_POOLS_COUNT]SmallChunkPool =
-            [_]SmallChunkPool{undefined} ** SMALL_CHUNK_POOLS_COUNT;
-        for (0..SMALL_CHUNK_POOLS_COUNT) |i| {
-            const cur_chunk_size = (i + 1) * SMALL_CHUNK_SIZE_STEP;
-            std.debug.assert(MIN_SMALL_CHUNK_SIZE <= cur_chunk_size);
-            std.debug.assert(cur_chunk_size <= MAX_SMALL_CHUNK_SIZE);
-            std.debug.assert(cur_chunk_size % SMALL_CHUNK_SIZE_STEP == 0);
-
-            small_chunk_pools[i] = SmallChunkPool.init(cur_chunk_size);
-        }
-
-        const small_chunk_pools_node_mempool = SmallChunkPool.NodeMemPool.init(common.OsMemoryAllocator);
-        const medium_chunk_arena_node_mempool = MediumChunkArena.NodeMemPool.init(common.OsMemoryAllocator);
-        const allocated_chunks_node_mempool = AllocatedChunksNodeMemPool.init(common.OsMemoryAllocator);
+    pub fn init(backing_allocator: std.mem.Allocator) Self {
+        const allocated_chunks_node_mempool = AllocatedChunksNodeMemPool.init(backing_allocator);
 
         return Self{
-            .small_chunk_pools_node_mempool = small_chunk_pools_node_mempool,
-            .small_chunk_pools = small_chunk_pools,
-            .medium_chunk_arena_node_mempool = medium_chunk_arena_node_mempool,
-            .medium_chunk_arena = MediumChunkArena{},
+            .backing_allocator = backing_allocator,
+            .small_chunks_arena = SmallChunksArena.init(backing_allocator),
+            .medium_chunks_arena = MediumChunksArena.init(backing_allocator),
             .allocated_chunks_node_mempool = allocated_chunks_node_mempool,
             .allocated_chunks = AllocatedChunks{},
         };
@@ -91,31 +72,18 @@ pub const SpAllocator = struct {
             var iter = self.allocated_chunks.inorderIterator();
 
             while (iter.next()) |node| {
-                std.log.err("Memory leak of address 0x{x} detected", .{@intFromPtr(node.key.payload)});
+                std.log.err("Memory leak of address 0x{x} detected", .{@intFromPtr(node.key.ptr)});
             }
         }
 
-        for (self.small_chunk_pools[0..SMALL_CHUNK_POOLS_COUNT]) |*pool| {
-            pool.deinit();
-        }
-        self.medium_chunk_arena.deinit();
-        self.small_chunk_pools_node_mempool.deinit();
+        self.small_chunks_arena.deinit();
+        self.medium_chunks_arena.deinit();
         self.allocated_chunks_node_mempool.deinit();
         return result;
     }
 
-    fn getSmallChunkPoolIndex(size: usize) usize {
-        std.debug.assert(MIN_SMALL_CHUNK_SIZE <= size);
-        std.debug.assert(size <= MAX_SMALL_CHUNK_SIZE);
-        std.debug.assert(size % SMALL_CHUNK_SIZE_STEP == 0);
-
-        const result = size / SMALL_CHUNK_SIZE_STEP - 1;
-        std.debug.assert(result < SMALL_CHUNK_POOLS_COUNT);
-        return result;
-    }
-
     fn getChunkSize(self: *Self, ptr: ErasedPtr) ?usize {
-        const entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr, .size = undefined });
+        const entry = self.allocated_chunks.getEntryFor(common.Chunk{ .ptr = ptr, .size = undefined });
         if (entry.node) |node| {
             return node.key.size;
         }
@@ -123,8 +91,8 @@ pub const SpAllocator = struct {
         return null;
     }
 
-    fn markChunkAllocated(self: *Self, chunk_ptr: ErasedPtr, chunk_size: usize) Error!void {
-        const allocated_chunk_header = AllocatedChunk{ .payload = chunk_ptr, .size = chunk_size };
+    fn markChunkAllocated(self: *Self, chunk: common.Chunk) Error!void {
+        const allocated_chunk_header = common.Chunk{ .ptr = chunk.ptr, .size = chunk.size };
 
         const new_node: *AllocatedChunks.Node = try self.allocated_chunks_node_mempool.create();
         new_node.key = allocated_chunk_header;
@@ -140,34 +108,23 @@ pub const SpAllocator = struct {
             return null;
         }
 
-        var size: usize = undefined;
-        var ptr: ErasedPtr = undefined;
+        var result: common.Chunk = undefined;
 
-        size = std.mem.alignForward(usize, requested_size, SMALL_CHUNK_SIZE_STEP);
-        switch (size) {
-            0...MAX_SMALL_CHUNK_SIZE => {
-                const pool_index = getSmallChunkPoolIndex(size);
-
-                std.debug.assert(self.small_chunk_pools[pool_index].chunk_size == size);
-
-                ptr = try self.small_chunk_pools[pool_index].getChunk(&self.small_chunk_pools_node_mempool);
-            },
-            (MAX_SMALL_CHUNK_SIZE + 1)...MAX_MEDIUM_CHUNK_SIZE => {
-                size = MediumChunkArena.roundSize(requested_size);
-                ptr = try self.medium_chunk_arena.getChunk(&self.medium_chunk_arena_node_mempool, size);
-            },
-            else => {
-                const aligned_size_overflows_usize = std.math.maxInt(usize) - requested_size < std.mem.page_size;
-                size = if (aligned_size_overflows_usize)
-                    std.math.maxInt(usize)
-                else
-                    std.mem.alignForward(usize, requested_size, std.mem.page_size);
-                ptr = try common.requestMemoryFromOS(size);
-            },
+        if (SmallChunksArena.chunkFits(requested_size)) {
+            result = try self.small_chunks_arena.getChunk(requested_size);
+        } else if (MediumChunksArena.chunkFits(requested_size)) {
+            result = try self.medium_chunks_arena.getChunk(requested_size);
+        } else {
+            const aligned_size_overflows_usize = std.math.maxInt(usize) - requested_size < std.mem.page_size;
+            result.size = if (aligned_size_overflows_usize)
+                std.math.maxInt(usize)
+            else
+                std.mem.alignForward(usize, requested_size, std.mem.page_size);
+            result.ptr = try common.allocatePages(self.backing_allocator, result.size);
         }
 
-        try self.markChunkAllocated(ptr, size);
-        return ptr;
+        try self.markChunkAllocated(result);
+        return result.ptr;
     }
 
     pub fn calloc(self: *Self, n: usize, elem_size: usize) Error!?ErasedPtr {
@@ -184,14 +141,14 @@ pub const SpAllocator = struct {
             return self.malloc(requested_size);
         }
 
-        if (!std.mem.isAligned(@intFromPtr(ptr), consts.CHUNK_ALIGNMENT)) {
+        if (!std.mem.isAligned(@intFromPtr(ptr), common.CHUNK_ALIGNMENT)) {
             return FreeError.InvalidAddress;
         }
 
         const ptr_casted: ErasedPtr = @ptrCast(@alignCast(ptr));
-        var chunk_entry = self.allocated_chunks.getEntryFor(AllocatedChunk{ .payload = ptr_casted, .size = undefined });
+        var chunk_entry = self.allocated_chunks.getEntryFor(common.Chunk{ .ptr = ptr_casted, .size = undefined });
         if (chunk_entry.node == null) {
-            // `ptr` is not valid allocated block address
+            // `ptr` was not found in allocated blocks addresses
             return FreeError.InvalidAddress;
         }
 
@@ -204,20 +161,20 @@ pub const SpAllocator = struct {
         }
 
         // specific things when resizing medium arena chunks
-        const cur_is_medium = MAX_SMALL_CHUNK_SIZE < cur_size and
-            cur_size <= MAX_MEDIUM_CHUNK_SIZE;
-        const requested_is_medium = MAX_SMALL_CHUNK_SIZE < requested_size and
-            requested_size <= MAX_MEDIUM_CHUNK_SIZE;
+        const cur_is_medium = MediumChunksArena.chunkFits(cur_size);
+        const requested_is_medium = MediumChunksArena.chunkFits(requested_size);
         if (cur_is_medium and requested_is_medium) {
-            const new_size = MediumChunkArena.roundSize(requested_size);
-            const result = self.medium_chunk_arena.tryResizeChunk(ptr_casted, cur_size, new_size);
-            if (result) |res_ptr| {
+            if (self.medium_chunks_arena.tryResizeChunk(
+                ptr_casted,
+                cur_size,
+                requested_size,
+            )) |result| {
                 chunk_entry.set(null);
-                node.key = AllocatedChunk{ .payload = res_ptr, .size = new_size };
+                node.key = result;
 
                 var entry = self.allocated_chunks.getEntryFor(node.key);
                 entry.set(node);
-                return res_ptr;
+                return result.ptr;
             }
         }
 
@@ -234,13 +191,13 @@ pub const SpAllocator = struct {
             return;
         }
 
-        if (!std.mem.isAligned(@intFromPtr(ptr), consts.CHUNK_ALIGNMENT)) {
+        if (!std.mem.isAligned(@intFromPtr(ptr), common.CHUNK_ALIGNMENT)) {
             // invalid (unaligned) address passed
             return FreeError.InvalidAddress;
         }
 
-        var entry = self.allocated_chunks.getEntryFor(AllocatedChunk{
-            .payload = @ptrCast(@alignCast(ptr)),
+        var entry = self.allocated_chunks.getEntryFor(common.Chunk{
+            .ptr = @ptrCast(@alignCast(ptr)),
             .size = undefined,
         });
         if (entry.node == null) {
@@ -251,17 +208,12 @@ pub const SpAllocator = struct {
         const chunk = entry.node.?.key;
         entry.set(null);
 
-        switch (chunk.size) {
-            0...MAX_SMALL_CHUNK_SIZE => {
-                const pool_index = getSmallChunkPoolIndex(chunk.size);
-                self.small_chunk_pools[pool_index].putChunk(chunk.payload);
-            },
-            (MAX_SMALL_CHUNK_SIZE + 1)...MAX_MEDIUM_CHUNK_SIZE => {
-                self.medium_chunk_arena.putChunk(chunk.payload, chunk.size);
-            },
-            else => {
-                common.returnMemoryToOS(chunk.payload, chunk.size);
-            },
+        if (SmallChunksArena.chunkFits(chunk.size)) {
+            self.small_chunks_arena.putChunk(chunk);
+        } else if (MediumChunksArena.chunkFits(chunk.size)) {
+            self.medium_chunks_arena.putChunk(chunk);
+        } else {
+            common.freePages(self.backing_allocator, chunk.ptr, chunk.size);
         }
     }
 };
@@ -275,7 +227,7 @@ export fn deinitAllocator() callconv(.C) void {
 
 fn ensureAllocatorIsInitialized() void {
     if (!is_allocator_initialized) {
-        allocator = SpAllocator.init();
+        allocator = SpAllocator.init(common.OsMemoryAllocator);
         _ = libc.atexit(deinitAllocator);
 
         is_allocator_initialized = true;
@@ -321,28 +273,22 @@ pub export fn spfree(ptr: ?*anyopaque) void {
     };
 }
 
-test "round size" {
-    try std.testing.expectEqual(256, MediumChunkArena.roundSize(142));
-    try std.testing.expectEqual(256, MediumChunkArena.roundSize(256));
-    try std.testing.expectEqual(512, MediumChunkArena.roundSize(257));
-}
-
 test "zero size allocation" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     try std.testing.expectEqual(null, try allocator.malloc(0));
 }
 
 test "null free" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     try std.testing.expect(allocator.free(null) != SpAllocator.FreeError.InvalidAddress);
 }
 
 test "basic" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     const len = 16;
@@ -360,7 +306,7 @@ test "basic" {
 }
 
 test "allocate, deallocate, allocate the same block" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var p = try allocator.malloc(@sizeOf(u32));
@@ -372,45 +318,45 @@ test "allocate, deallocate, allocate the same block" {
 }
 
 test "medium size chunks" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
-    var p: [*]u8 = (try allocator.malloc(MAX_SMALL_CHUNK_SIZE + 15)).?;
-    p[MAX_SMALL_CHUNK_SIZE + 14] = 42;
+    var p: [*]u8 = (try allocator.malloc(config.MAX_SMALL_CHUNK_SIZE + 15)).?;
+    p[config.MAX_SMALL_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(MIN_MEDIUM_CHUNK_SIZE * 4)).?;
-    p[MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
+    p = (try allocator.malloc(config.MIN_MEDIUM_CHUNK_SIZE * 4)).?;
+    p[config.MIN_MEDIUM_CHUNK_SIZE * 4 - 3] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE)).?;
-    p[MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
+    p = (try allocator.malloc(config.MAX_MEDIUM_CHUNK_SIZE)).?;
+    p[config.MAX_MEDIUM_CHUNK_SIZE - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
 
 test "large chunks" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
-    var p: [*]u8 = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE + 15)).?;
-    p[MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
+    var p: [*]u8 = (try allocator.malloc(config.MAX_MEDIUM_CHUNK_SIZE + 15)).?;
+    p[config.MAX_MEDIUM_CHUNK_SIZE + 14] = 42;
     try allocator.free(p);
 
-    p = (try allocator.malloc(MAX_MEDIUM_CHUNK_SIZE * 2)).?;
-    p[MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
+    p = (try allocator.malloc(config.MAX_MEDIUM_CHUNK_SIZE * 2)).?;
+    p[config.MAX_MEDIUM_CHUNK_SIZE * 2 - 3] = 42;
     try allocator.free(p);
 
     try std.testing.expectEqual(.ok, allocator.detectLeaks());
 }
 
 test "out of memory" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     var size: usize = std.math.maxInt(usize);
-    size -= size % SMALL_CHUNK_SIZE_STEP;
+    size -= size % config.SMALL_CHUNK_SIZE_STEP;
 
     const p = allocator.malloc(size);
     try std.testing.expectEqual(Error.OutOfMemory, p);
@@ -419,7 +365,7 @@ test "out of memory" {
 }
 
 test "leak" {
-    allocator = SpAllocator.init();
+    allocator = SpAllocator.init(std.testing.allocator);
     defer std.debug.assert(allocator.deinit(SpAllocator.DeinitOptions.silent) == .ok);
 
     const p = (try allocator.malloc(16)).?;
